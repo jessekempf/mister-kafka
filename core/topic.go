@@ -49,15 +49,22 @@ func DeclareConsumerTopic[T any](name string, decoder func(key []byte, value []b
 
 // ProducerTopic is a topic to which messages with key type K and value type V may be produced.
 type ProducerTopic[K any, V any] struct {
-	name    string
-	encoder func(key K, value V) ([]byte, []byte, error)
+	name         string
+	keyEncoder   func(key K) ([]byte, error)
+	valueEncoder func(value V) ([]byte, error)
 }
 
 // EncodeMessage takes an OutboundMessage and turns it into a kafka.Message.
 func (t *ProducerTopic[K, V]) EncodeMessage(om OutboundMessage[K, V]) (*kafka.Message, error) {
 	k, v, h := om.AsMessage()
 
-	ek, ev, err := t.encoder(k, v)
+	ek, err := t.keyEncoder(k)
+
+	if err != nil {
+		return nil, err
+	}
+
+	ev, err := t.valueEncoder(v)
 
 	if err != nil {
 		return nil, err
@@ -73,9 +80,10 @@ func (t *ProducerTopic[K, V]) EncodeMessage(om OutboundMessage[K, V]) (*kafka.Me
 
 // DeclareProducerTopic creates a ProducerTopic[T], that names a Kafka topic that is expected
 // to accept messages with K keys and V bodies.
-func DeclareProducerTopic[K any, V any](name string, encoder func(key K, value V) ([]byte, []byte, error)) ProducerTopic[K, V] {
+func DeclareProducerTopic[K any, V any](name string, keyEncoder func(key K) ([]byte, error), valueEncoder func(value V) ([]byte, error)) ProducerTopic[K, V] {
 	return ProducerTopic[K, V]{
-		name:    name,
-		encoder: encoder,
+		name:         name,
+		keyEncoder:   keyEncoder,
+		valueEncoder: valueEncoder,
 	}
 }
