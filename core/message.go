@@ -7,10 +7,10 @@ import (
 )
 
 // OutboundMessage represents a message being produced to Kafka.
-type OutboundMessage[K any, V any] struct {
-	Key     K
-	Value   V
-	Headers []kafka.Header
+type OutboundMessage[K any, V any] interface {
+	Key() K
+	Value() V
+	Headers() []kafka.Header
 }
 
 // InboundMessage represents a message being consumed from Kafka.

@@ -36,7 +36,7 @@ func (p *Producer[K, V]) Produce(ctx context.Context, payloads ...core.OutboundM
 	messages := make([]kafka.Message, len(payloads))
 
 	for i, payload := range payloads {
-		m, err := p.topic.EncodeMessage(&payload)
+		m, err := p.topic.EncodeMessage(payload)
 
 		if err != nil {
 			return err

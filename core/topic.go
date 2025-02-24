@@ -56,8 +56,8 @@ type ProducerTopic[K any, V any] struct {
 }
 
 // EncodeMessage takes an OutboundMessage and turns it into a kafka.Message.
-func (t *ProducerTopic[K, V]) EncodeMessage(om *OutboundMessage[K, V]) (*kafka.Message, error) {
-	k, v, err := t.encoder(om.Key, om.Value)
+func (t *ProducerTopic[K, V]) EncodeMessage(om OutboundMessage[K, V]) (*kafka.Message, error) {
+	k, v, err := t.encoder(om.Key(), om.Value())
 
 	if err != nil {
 		return nil, err
@@ -67,7 +67,7 @@ func (t *ProducerTopic[K, V]) EncodeMessage(om *OutboundMessage[K, V]) (*kafka.M
 		Topic:   t.name,
 		Key:     k,
 		Value:   v,
-		Headers: om.Headers,
+		Headers: om.Headers(),
 	}, nil
 }
 
