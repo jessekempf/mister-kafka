@@ -8,19 +8,15 @@ import (
 
 // OutboundMessage represents a message being produced to Kafka.
 type OutboundMessage[K any, V any] interface {
-	Key() K
-	Value() V
-	Headers() []kafka.Header
+	AsMessage() (K, V, []kafka.Header)
 }
 
 // InboundMessage represents a message being consumed from Kafka.
-type InboundMessage[K any, V any] struct {
+type InboundMessage[T any] struct {
 	Topic         string
 	Partition     int
 	Offset        int64
 	HighWaterMark int64
-	Key           K
-	Value         V
-	Headers       []kafka.Header
+	Body          T
 	Time          time.Time
 }
