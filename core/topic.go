@@ -12,6 +12,10 @@ type ConsumerTopic[K any, V any] struct {
 	decoder func([]byte, []byte) (K, V, error)
 }
 
+func (t *ConsumerTopic[K, V]) Name() string {
+	return t.name
+}
+
 // DecodeMessage takes a kafka.Message and turns it into an InboundMessage.
 func (t *ConsumerTopic[K, V]) DecodeMessage(km *kafka.Message) (*InboundMessage[K, V], error) {
 	if t.name != km.Topic {
@@ -60,6 +64,7 @@ func (t *ProducerTopic[K, V]) EncodeMessage(om *OutboundMessage[K, V]) (*kafka.M
 	}
 
 	return &kafka.Message{
+		Topic:   t.name,
 		Key:     k,
 		Value:   v,
 		Headers: om.Headers,
