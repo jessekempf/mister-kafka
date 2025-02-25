@@ -19,7 +19,7 @@ func (t *ConsumerTopic[T]) Name() string {
 // DecodeMessage takes a kafka.Message and turns it into an InboundMessage.
 func (t *ConsumerTopic[T]) DecodeMessage(km *kafka.Message) (*InboundMessage[T], error) {
 	if t.name != km.Topic {
-		panic(fmt.Sprintf("can't happen: somehow received message from %s on %s!", km.Topic, t.name))
+		panic(fmt.Sprintf("can't happen: somehow received message from '%s' on '%s'!", km.Topic, t.name))
 	}
 
 	body, err := t.decoder(km.Key, km.Value, km.Headers)

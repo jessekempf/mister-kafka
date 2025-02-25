@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/jessekempf/mister-kafka/core"
 	"github.com/segmentio/kafka-go"
@@ -50,8 +51,16 @@ func (c *Consumer[T]) Consume(ctx context.Context, handle func(*core.InboundMess
 			c.reader.Close()
 			return nil
 		default:
-			msg, err := c.reader.FetchMessage(ctx)
+			timeoutCtx, timeoutCancel := context.WithTimeout(ctx, time.Second)
+
+			defer timeoutCancel()
+
+			msg, err := c.reader.FetchMessage(timeoutCtx)
+
 			if err != nil {
+				if err == context.DeadlineExceeded {
+					continue
+				}
 				return err
 			}
 
