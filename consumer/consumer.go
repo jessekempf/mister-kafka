@@ -47,8 +47,11 @@ func (c *Consumer[T]) Consume(ctx context.Context, handle func(*core.InboundMess
 	for {
 		select {
 		case sig := <-sc:
-			log.Printf("received %s, shutting down", sig)
-			c.reader.Close()
+			log.Printf("received %s signal, shutting down...", sig)
+
+			if err := c.reader.Close(); err != nil {
+				log.Printf("closing Kafka session returned: %v\n", err)
+			}
 			return nil
 		default:
 			timeoutCtx, timeoutCancel := context.WithTimeout(ctx, time.Second)
