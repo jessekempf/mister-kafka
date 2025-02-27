@@ -262,12 +262,6 @@ func (cr *JoinedCoordinatedReader) SyncGroup(ctx context.Context) (*SyncedCoordi
 		groupMembers := make([]kafka.GroupMember, len(cr.groupMembers))
 		topics := make([]string, 0, len(cr.groupMembers))
 
-		conn, err := kafka.DialContext(ctx, cr.coordinator.Addr.Network(), cr.coordinator.Addr.String())
-
-		if err != nil {
-			return nil, err
-		}
-
 		for i, joinGroupMember := range cr.groupMembers {
 			groupMembers[i] = kafka.GroupMember{
 				ID:       joinGroupMember.ID,
@@ -277,14 +271,18 @@ func (cr *JoinedCoordinatedReader) SyncGroup(ctx context.Context) (*SyncedCoordi
 			topics = append(topics, joinGroupMember.Metadata.Topics...)
 		}
 
-		partitions, err := conn.ReadPartitions(topics...)
+		mresp, err := cr.coordinator.Metadata(ctx, &kafka.MetadataRequest{
+			Topics: topics,
+		})
 
 		if err != nil {
-			cerr := conn.Close()
-			if cerr != nil {
-				return nil, fmt.Errorf("received error %s while closing connection due to %s", cerr, err)
-			}
 			return nil, err
+		}
+
+		partitions := []kafka.Partition{}
+
+		for _, topic := range mresp.Topics {
+			partitions = slices.Concat(partitions, topic.Partitions)
 		}
 
 		for memberId, memberAssignments := range cr.groupBalancer.AssignGroups(groupMembers, partitions) {
