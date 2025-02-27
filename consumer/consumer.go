@@ -56,21 +56,22 @@ func NewConsumer[T any](broker net.Addr, consumerGroup string, topic core.Consum
 // Consume consumes messages containing Ts, passing each to the provided handle callback. Runs in the
 // caller's thread. Returns on first error.
 func (c *Consumer[T]) Consume(ctx context.Context, handle func(*core.InboundMessage[T]) error) error {
-	var syncedReader *SyncedCoordinatedReader
+	var joined *JoinedCoordinatedReader
+	var synced *SyncedCoordinatedReader
 
-	cr1, err := NewCoordinatedReader(ctx, c.client.Addr, c.groupID)
-
-	if err != nil {
-		return err
-	}
-
-	cr2, err := cr1.JoinGroup(ctx, []string{c.topic.Name()})
+	initial, err := NewCoordinatedReader(ctx, c.client.Addr, c.groupID)
 
 	if err != nil {
 		return err
 	}
 
-	syncedReader, err = cr2.SyncGroup(ctx)
+	joined, err = initial.JoinGroup(ctx, []string{c.topic.Name()})
+
+	if err != nil {
+		return err
+	}
+
+	synced, err = joined.SyncGroup(ctx)
 
 	if err != nil {
 		return err
@@ -89,7 +90,7 @@ func (c *Consumer[T]) Consume(ctx context.Context, handle func(*core.InboundMess
 				log.Printf("closing Kafka session returned: %v\n", err)
 			}
 
-			return syncedReader.LeaveGroup(ctx)
+			return synced.LeaveGroup(ctx)
 		default:
 			timeoutCtx, timeoutCancel := context.WithTimeout(ctx, time.Second)
 
@@ -123,7 +124,7 @@ func (c *Consumer[T]) Consume(ctx context.Context, handle func(*core.InboundMess
 				}
 			}
 
-			msgs, err := syncedReader.FetchMessages(ctx)
+			msgs, err := synced.FetchMessages(ctx)
 
 			if err != nil {
 				return err
@@ -148,18 +149,33 @@ func (c *Consumer[T]) Consume(ctx context.Context, handle func(*core.InboundMess
 				}
 			}
 
-			err = syncedReader.CommitMessages(ctx, msgs)
+			err = synced.CommitMessages(ctx, msgs)
 
 			if err != nil {
-				if errors.Is(err, kafka.IllegalGeneration) {
-					log.Printf("caught illegal generation error, resyncing.")
-					syncedReader, err = cr2.SyncGroup(ctx)
+				if errors.Is(err, kafka.RebalanceInProgress) {
+					log.Printf("rebalance in progress, rejoining group")
+
+					joined, err = initial.JoinGroup(ctx, []string{c.topic.Name()})
+					if err != nil {
+						return err
+					}
+
+					synced, err = joined.SyncGroup(ctx)
 					if err != nil {
 						return err
 					}
 
 					continue
 				}
+				// if errors.Is(err, kafka.IllegalGeneration) {
+				// 	log.Printf("caught illegal generation error, resyncing.")
+				// 	syncedReader, err = cr2.SyncGroup(ctx)
+				// 	if err != nil {
+				// 		return err
+				// 	}
+
+				// 	continue
+				// }
 
 				return err
 			}
@@ -259,7 +275,7 @@ func (cr *InitialCoordinatedReader) JoinGroup(ctx context.Context, topics []stri
 		GroupID:          cr.group,
 		SessionTimeout:   30 * time.Second,
 		RebalanceTimeout: 30 * time.Second,
-		GroupInstanceID:  hostname,
+		GroupInstanceID:  fmt.Sprintf("%s-%d", hostname, os.Getpid()),
 		Protocols:        groupProtocols,
 		MemberID:         "",
 		ProtocolType:     "consumer",
