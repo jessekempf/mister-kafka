@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/jessekempf/mister-kafka/core"
 	"github.com/segmentio/kafka-go"
 )
@@ -21,7 +22,6 @@ import (
 type Consumer[T any] struct {
 	topic   core.ConsumerTopic[T]
 	groupID string
-	reader  *kafka.Reader
 	client  *kafka.Client
 }
 
@@ -29,23 +29,6 @@ type Consumer[T any] struct {
 func NewConsumer[T any](broker net.Addr, consumerGroup string, topic core.ConsumerTopic[T]) *Consumer[T] {
 	return &Consumer[T]{
 		topic: topic,
-		reader: kafka.NewReader(
-			kafka.ReaderConfig{
-				Brokers:               []string{broker.String()},
-				GroupID:               consumerGroup,
-				Topic:                 topic.Name(),
-				CommitInterval:        0, // Synchronous
-				WatchPartitionChanges: true,
-				StartOffset:           kafka.FirstOffset,
-				MaxAttempts:           0,
-				Logger: kafka.LoggerFunc(func(format string, args ...interface{}) {
-					log.Printf("kafka.Reader: %s", fmt.Sprintf(format, args...))
-				}),
-				ErrorLogger: kafka.LoggerFunc(func(format string, args ...interface{}) {
-					log.Printf("kafka.Reader[err]: %s", fmt.Sprintf(format, args...))
-				}),
-			},
-		),
 		client: &kafka.Client{
 			Addr: broker,
 		},
@@ -86,44 +69,8 @@ func (c *Consumer[T]) Consume(ctx context.Context, handle func(*core.InboundMess
 		case sig := <-sc:
 			log.Printf("received %s signal, shutting down...", sig)
 
-			if err := c.reader.Close(); err != nil {
-				log.Printf("closing Kafka session returned: %v\n", err)
-			}
-
 			return synced.LeaveGroup(ctx)
 		default:
-			timeoutCtx, timeoutCancel := context.WithTimeout(ctx, time.Second)
-
-			defer timeoutCancel()
-
-			msg, err := c.reader.FetchMessage(timeoutCtx)
-			ok := true
-
-			if err != nil {
-				if err == context.DeadlineExceeded {
-					ok = false
-				} else {
-					return err
-				}
-			}
-
-			if ok {
-				decoded, err := c.topic.DecodeMessage(&msg)
-
-				if err != nil {
-					return err
-				}
-
-				if err = handle(decoded); err != nil {
-					return err
-				}
-
-				err = c.reader.CommitMessages(ctx, msg)
-				if err != nil {
-					return err
-				}
-			}
-
 			msgs, err := synced.FetchMessages(ctx)
 
 			if err != nil {
@@ -167,15 +114,6 @@ func (c *Consumer[T]) Consume(ctx context.Context, handle func(*core.InboundMess
 
 					continue
 				}
-				// if errors.Is(err, kafka.IllegalGeneration) {
-				// 	log.Printf("caught illegal generation error, resyncing.")
-				// 	syncedReader, err = cr2.SyncGroup(ctx)
-				// 	if err != nil {
-				// 		return err
-				// 	}
-
-				// 	continue
-				// }
 
 				return err
 			}
@@ -189,8 +127,10 @@ type InitialCoordinatedReader struct {
 }
 
 type JoinedCoordinatedReader struct {
-	coordinator *kafka.Client
-	stateVector StateVector
+	coordinator   *kafka.Client
+	stateVector   StateVector
+	groupBalancer kafka.GroupBalancer
+	groupMembers  []kafka.JoinGroupResponseMember
 }
 
 type SyncedCoordinatedReader struct {
@@ -253,6 +193,7 @@ func (cr *InitialCoordinatedReader) JoinGroup(ctx context.Context, topics []stri
 	}
 
 	groupProtocols := []kafka.GroupProtocol{}
+	groupBalancerMap := make(map[string]kafka.GroupBalancer, len(groupBalancers))
 
 	for _, balancer := range groupBalancers {
 		userData, err := balancer.UserData()
@@ -269,6 +210,8 @@ func (cr *InitialCoordinatedReader) JoinGroup(ctx context.Context, topics []stri
 			},
 		},
 		)
+
+		groupBalancerMap[balancer.ProtocolName()] = balancer
 	}
 
 	req := &kafka.JoinGroupRequest{
@@ -291,6 +234,11 @@ func (cr *InitialCoordinatedReader) JoinGroup(ctx context.Context, topics []stri
 		return nil, resp.Error
 	}
 
+	groupBalancer, ok := groupBalancerMap[resp.ProtocolName]
+	if !ok {
+		return nil, fmt.Errorf("coordinator assigned unsupported group balancer '%s'", resp.ProtocolName)
+	}
+
 	return &JoinedCoordinatedReader{
 		coordinator: &kafka.Client{
 			Addr: cr.coordinator.Addr,
@@ -303,21 +251,89 @@ func (cr *InitialCoordinatedReader) JoinGroup(ctx context.Context, topics []stri
 			ProtocolType:    resp.ProtocolType,
 			ProtocolName:    resp.ProtocolName,
 		},
+		groupMembers:  resp.Members,
+		groupBalancer: groupBalancer,
 	}, nil
 }
 
 func (cr *JoinedCoordinatedReader) SyncGroup(ctx context.Context) (*SyncedCoordinatedReader, error) {
-	sgresp, err := cr.coordinator.SyncGroup(ctx, &kafka.SyncGroupRequest{
-		GroupID:         cr.stateVector.GroupID,
-		GenerationID:    cr.stateVector.GenerationID,
-		MemberID:        cr.stateVector.MemberID,
-		GroupInstanceID: cr.stateVector.GroupInstanceID,
-		ProtocolType:    cr.stateVector.ProtocolType,
-		ProtocolName:    cr.stateVector.ProtocolName,
-	})
+	var sgresp *kafka.SyncGroupResponse
+	var err error
+
+	if len(cr.groupMembers) > 0 {
+		log.Printf("HOLY SHIT I'M THE LEADER!\n")
+		log.Println(spew.Sdump(cr))
+
+		groupMembers := make([]kafka.GroupMember, len(cr.groupMembers))
+		topics := make([]string, 0, len(cr.groupMembers))
+
+		conn, err := kafka.DialContext(ctx, cr.coordinator.Addr.Network(), cr.coordinator.Addr.String())
+
+		if err != nil {
+			return nil, err
+		}
+
+		for i, joinGroupMember := range cr.groupMembers {
+			groupMembers[i] = kafka.GroupMember{
+				ID:       joinGroupMember.ID,
+				Topics:   joinGroupMember.Metadata.Topics,
+				UserData: joinGroupMember.Metadata.UserData,
+			}
+			topics = append(topics, joinGroupMember.Metadata.Topics...)
+		}
+
+		partitions, err := conn.ReadPartitions(topics...)
+
+		if err != nil {
+			cerr := conn.Close()
+			if cerr != nil {
+				return nil, fmt.Errorf("received error %s while closing connection due to %s", cerr, err)
+			}
+			return nil, err
+		}
+
+		assignments := []kafka.SyncGroupRequestAssignment{}
+
+		for memberId, memberAssignments := range cr.groupBalancer.AssignGroups(groupMembers, partitions) {
+			assignments = append(assignments, kafka.SyncGroupRequestAssignment{
+				MemberID: memberId,
+				Assignment: kafka.GroupProtocolAssignment{
+					AssignedPartitions: memberAssignments,
+					UserData:           []byte{},
+				},
+			})
+
+			log.Printf("JoinedCoordinatedReader.SyncGroup(): assigning %s the following partitions: %v\n", memberId, memberAssignments)
+		}
+
+		sgresp, err = cr.coordinator.SyncGroup(ctx, &kafka.SyncGroupRequest{
+			GroupID:         cr.stateVector.GroupID,
+			GenerationID:    cr.stateVector.GenerationID,
+			MemberID:        cr.stateVector.MemberID,
+			GroupInstanceID: cr.stateVector.GroupInstanceID,
+			ProtocolType:    cr.stateVector.ProtocolType,
+			ProtocolName:    cr.stateVector.ProtocolName,
+			Assignments:     assignments,
+		})
+	} else {
+		sgresp, err = cr.coordinator.SyncGroup(ctx, &kafka.SyncGroupRequest{
+			GroupID:         cr.stateVector.GroupID,
+			GenerationID:    cr.stateVector.GenerationID,
+			MemberID:        cr.stateVector.MemberID,
+			GroupInstanceID: cr.stateVector.GroupInstanceID,
+			ProtocolType:    cr.stateVector.ProtocolType,
+			ProtocolName:    cr.stateVector.ProtocolName,
+		})
+	}
 
 	if err != nil {
 		return nil, err
+	}
+
+	assignmentCount := 0
+
+	for _, partitions := range sgresp.Assignment.AssignedPartitions {
+		assignmentCount += len(partitions)
 	}
 
 	ofresp, err := cr.coordinator.OffsetFetch(ctx, &kafka.OffsetFetchRequest{
@@ -334,7 +350,6 @@ func (cr *JoinedCoordinatedReader) SyncGroup(ctx context.Context) (*SyncedCoordi
 	}
 
 	offsets := make(map[string]map[int]int64)
-	assignmentCount := 0
 
 	for topic := range ofresp.Topics {
 		for _, partitionInfo := range ofresp.Topics[topic] {
@@ -343,7 +358,6 @@ func (cr *JoinedCoordinatedReader) SyncGroup(ctx context.Context) (*SyncedCoordi
 			}
 
 			offsets[topic][partitionInfo.Partition] = partitionInfo.CommittedOffset
-			assignmentCount++
 		}
 	}
 
@@ -380,7 +394,7 @@ func (cr *SyncedCoordinatedReader) FetchMessages(ctx context.Context) ([]*kafka.
 				Topic:          topic,
 				Partition:      partition,
 				Offset:         cr.offsets[topic][partition],
-				MinBytes:       0,
+				MinBytes:       1,
 				MaxBytes:       1024 * 1024,
 				MaxWait:        1 * time.Second,
 				IsolationLevel: kafka.ReadCommitted,
