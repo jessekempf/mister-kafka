@@ -78,24 +78,28 @@ func (c *Consumer[T]) Consume(ctx context.Context, handle func(*core.InboundMess
 
 			messages := make([]*core.InboundMessage[T], 0, len(msgs))
 
-			for _, message := range msgs {
-				im, err := c.topic.DecodeMessage(message)
+			if len(messages) == 0 {
+				err = synced.Heartbeat(ctx)
+			} else {
+				for _, message := range msgs {
+					im, err := c.topic.DecodeMessage(message)
 
-				if err != nil {
-					return err
+					if err != nil {
+						return err
+					}
+
+					messages = append(messages, im)
 				}
 
-				messages = append(messages, im)
-			}
-
-			for _, message := range messages {
-				err := handle(message)
-				if err != nil {
-					return err
+				for _, message := range messages {
+					err := handle(message)
+					if err != nil {
+						return err
+					}
 				}
-			}
 
-			err = synced.CommitMessages(ctx, msgs)
+				err = synced.CommitMessages(ctx, msgs)
+			}
 
 			if err != nil {
 				if errors.Is(err, kafka.RebalanceInProgress) {
@@ -459,25 +463,6 @@ func (cr *SyncedCoordinatedReader) CommitMessages(ctx context.Context, messages 
 
 	}
 
-	if len(newOffsets) > 0 {
-		err := cr.OffsetCommit(ctx, newOffsets)
-
-		if err != nil {
-			return err
-		}
-
-		for topic, partitionOffsets := range newOffsets {
-			for partition, offset := range partitionOffsets {
-				cr.offsets[topic][partition] = offset
-			}
-		}
-		return nil
-	} else {
-		return cr.Heartbeat(ctx)
-	}
-}
-
-func (cr *SyncedCoordinatedReader) OffsetCommit(ctx context.Context, newOffsets map[string]map[int]int64) error {
 	offsetsToCommit := make(map[string][]kafka.OffsetCommit)
 
 	for topic, partitionOffsets := range newOffsets {
@@ -519,8 +504,11 @@ func (cr *SyncedCoordinatedReader) OffsetCommit(ctx context.Context, newOffsets 
 				topic,
 				offsetCommit.Partition,
 			)
+
+			cr.offsets[topic][offsetCommit.Partition] = newOffsets[topic][offsetCommit.Partition]
 		}
 	}
+
 	return nil
 }
 
