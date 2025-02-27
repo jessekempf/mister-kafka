@@ -38,32 +38,52 @@ func NewConsumer[T any](broker net.Addr, consumerGroup string, topic core.Consum
 // Consume consumes messages containing Ts, passing each to the provided handle callback. Runs in the
 // caller's thread. Returns on first error.
 func (c *Consumer[T]) Consume(ctx context.Context, handle func(*core.InboundMessage[T]) error) error {
+	var initial *InitialCoordinatedReader
 	var joined *JoinedCoordinatedReader
 	var synced *SyncedCoordinatedReader
 
-	initial, err := NewCoordinatedReader(ctx, c.client.Addr, c.groupID)
-
-	if err != nil {
-		return err
+	initialize := func() (err error) {
+		initial, err = NewCoordinatedReader(ctx, c.client.Addr, c.groupID)
+		return
 	}
 
-	joined, err = initial.JoinGroup(ctx, []string{c.topic.Name()})
-
-	if err != nil {
-		return err
+	join := func() (err error) {
+		joined, err = initial.JoinGroup(ctx, []string{c.topic.Name()})
+		return
 	}
 
-	synced, err = joined.SyncGroup(ctx)
-
-	if err != nil {
-		return err
+	sync := func() (err error) {
+		synced, err = joined.SyncGroup(ctx)
+		return
 	}
 
+	// Arrange to trap SIGNINT
 	sc := make(chan os.Signal, 1)
-
 	signal.Notify(sc, syscall.SIGINT)
 
 	for {
+		if initial == nil {
+			if err := initialize(); err != nil {
+				return err
+			}
+		}
+
+		if joined == nil {
+			if err := join(); err != nil {
+				return err
+			}
+
+			log.Printf("successfully joined group %s for %s\n", c.groupID, c.topic.Name())
+		}
+
+		if synced == nil {
+			if err := sync(); err != nil {
+				return err
+			}
+
+			log.Printf("successfully synced group %s for %s\n", c.groupID, c.topic.Name())
+		}
+
 		select {
 		case sig := <-sc:
 			log.Printf("received %s signal, shutting down...", sig)
@@ -103,18 +123,9 @@ func (c *Consumer[T]) Consume(ctx context.Context, handle func(*core.InboundMess
 
 			if err != nil {
 				if errors.Is(err, kafka.RebalanceInProgress) {
-					log.Printf("rebalance in progress, rejoining group")
-
-					joined, err = initial.JoinGroup(ctx, []string{c.topic.Name()})
-					if err != nil {
-						return err
-					}
-
-					synced, err = joined.SyncGroup(ctx)
-					if err != nil {
-						return err
-					}
-
+					log.Printf("rebalance in progress, forcing rejoin")
+					joined = nil
+					synced = nil
 					continue
 				}
 
