@@ -231,7 +231,7 @@ func (cr *InitialCoordinatedReader) JoinGroup(ctx context.Context, topics []stri
 
 	if len(groupBalancers) == 0 {
 		groupBalancers = []kafka.GroupBalancer{
-			// kafka.RangeGroupBalancer{},
+			kafka.RangeGroupBalancer{},
 			kafka.RoundRobinGroupBalancer{},
 		}
 	}
