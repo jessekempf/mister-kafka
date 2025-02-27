@@ -260,7 +260,7 @@ func (cr *JoinedCoordinatedReader) SyncGroup(ctx context.Context) (*SyncedCoordi
 
 	if len(cr.groupMembers) > 0 {
 		groupMembers := make([]kafka.GroupMember, len(cr.groupMembers))
-		topics := make([]string, 0, len(cr.groupMembers))
+		topics := []string{}
 
 		for i, joinGroupMember := range cr.groupMembers {
 			groupMembers[i] = kafka.GroupMember{
@@ -268,7 +268,12 @@ func (cr *JoinedCoordinatedReader) SyncGroup(ctx context.Context) (*SyncedCoordi
 				Topics:   joinGroupMember.Metadata.Topics,
 				UserData: joinGroupMember.Metadata.UserData,
 			}
-			topics = append(topics, joinGroupMember.Metadata.Topics...)
+
+			for _, topic := range groupMembers[i].Topics {
+				if !slices.Contains(topics, topic) {
+					topics = append(topics, topic)
+				}
+			}
 		}
 
 		mresp, err := cr.coordinator.Metadata(ctx, &kafka.MetadataRequest{
@@ -294,7 +299,7 @@ func (cr *JoinedCoordinatedReader) SyncGroup(ctx context.Context) (*SyncedCoordi
 				},
 			})
 
-			log.Printf("JoinedCoordinatedReader.SyncGroup(): assigning %s the following partitions: %v\n", memberId, memberAssignments)
+			log.Printf("JoinedCoordinatedReader.SyncGroup(): using %s to assign %s the following partitions: %v\n", cr.groupBalancer.ProtocolName(), memberId, memberAssignments)
 		}
 
 	}
