@@ -13,7 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/davecgh/go-spew/spew"
 	"github.com/jessekempf/mister-kafka/core"
 	"github.com/segmentio/kafka-go"
 )
@@ -257,13 +256,9 @@ func (cr *InitialCoordinatedReader) JoinGroup(ctx context.Context, topics []stri
 }
 
 func (cr *JoinedCoordinatedReader) SyncGroup(ctx context.Context) (*SyncedCoordinatedReader, error) {
-	var sgresp *kafka.SyncGroupResponse
-	var err error
+	assignments := []kafka.SyncGroupRequestAssignment{}
 
 	if len(cr.groupMembers) > 0 {
-		log.Printf("HOLY SHIT I'M THE LEADER!\n")
-		log.Println(spew.Sdump(cr))
-
 		groupMembers := make([]kafka.GroupMember, len(cr.groupMembers))
 		topics := make([]string, 0, len(cr.groupMembers))
 
@@ -292,8 +287,6 @@ func (cr *JoinedCoordinatedReader) SyncGroup(ctx context.Context) (*SyncedCoordi
 			return nil, err
 		}
 
-		assignments := []kafka.SyncGroupRequestAssignment{}
-
 		for memberId, memberAssignments := range cr.groupBalancer.AssignGroups(groupMembers, partitions) {
 			assignments = append(assignments, kafka.SyncGroupRequestAssignment{
 				MemberID: memberId,
@@ -306,25 +299,17 @@ func (cr *JoinedCoordinatedReader) SyncGroup(ctx context.Context) (*SyncedCoordi
 			log.Printf("JoinedCoordinatedReader.SyncGroup(): assigning %s the following partitions: %v\n", memberId, memberAssignments)
 		}
 
-		sgresp, err = cr.coordinator.SyncGroup(ctx, &kafka.SyncGroupRequest{
-			GroupID:         cr.stateVector.GroupID,
-			GenerationID:    cr.stateVector.GenerationID,
-			MemberID:        cr.stateVector.MemberID,
-			GroupInstanceID: cr.stateVector.GroupInstanceID,
-			ProtocolType:    cr.stateVector.ProtocolType,
-			ProtocolName:    cr.stateVector.ProtocolName,
-			Assignments:     assignments,
-		})
-	} else {
-		sgresp, err = cr.coordinator.SyncGroup(ctx, &kafka.SyncGroupRequest{
-			GroupID:         cr.stateVector.GroupID,
-			GenerationID:    cr.stateVector.GenerationID,
-			MemberID:        cr.stateVector.MemberID,
-			GroupInstanceID: cr.stateVector.GroupInstanceID,
-			ProtocolType:    cr.stateVector.ProtocolType,
-			ProtocolName:    cr.stateVector.ProtocolName,
-		})
 	}
+
+	sgresp, err := cr.coordinator.SyncGroup(ctx, &kafka.SyncGroupRequest{
+		GroupID:         cr.stateVector.GroupID,
+		GenerationID:    cr.stateVector.GenerationID,
+		MemberID:        cr.stateVector.MemberID,
+		GroupInstanceID: cr.stateVector.GroupInstanceID,
+		ProtocolType:    cr.stateVector.ProtocolType,
+		ProtocolName:    cr.stateVector.ProtocolName,
+		Assignments:     assignments,
+	})
 
 	if err != nil {
 		return nil, err
