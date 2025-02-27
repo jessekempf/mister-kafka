@@ -9,10 +9,10 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 	"time"
 
-	"github.com/davecgh/go-spew/spew"
 	"github.com/jessekempf/mister-kafka/core"
 	"github.com/segmentio/kafka-go"
 )
@@ -178,10 +178,11 @@ type JoinedCoordinatedReader struct {
 }
 
 type SyncedCoordinatedReader struct {
-	coordinator *kafka.Client
-	stateVector StateVector
-	offsets     map[string]map[int]int64
-	assignments map[string][]int
+	coordinator     *kafka.Client
+	stateVector     StateVector
+	offsets         map[string]map[int]int64
+	assignments     map[string][]int
+	assignmentCount int
 }
 
 type StateVector struct {
@@ -312,13 +313,12 @@ func (cr *JoinedCoordinatedReader) SyncGroup(ctx context.Context) (*SyncedCoordi
 		return nil, err
 	}
 
-	log.Println(spew.Sdump(ofresp))
-
 	if ofresp.Error != nil {
 		return nil, err
 	}
 
 	offsets := make(map[string]map[int]int64)
+	assignmentCount := 0
 
 	for topic := range ofresp.Topics {
 		for _, partitionInfo := range ofresp.Topics[topic] {
@@ -327,8 +327,15 @@ func (cr *JoinedCoordinatedReader) SyncGroup(ctx context.Context) (*SyncedCoordi
 			}
 
 			offsets[topic][partitionInfo.Partition] = partitionInfo.CommittedOffset
+			assignmentCount++
 		}
 	}
+
+	log.Printf(
+		"JoinedCoordinatedReader.SyncGroup(): received %d partition assignments: %#v\n",
+		assignmentCount,
+		sgresp.Assignment.AssignedPartitions,
+	)
 
 	return &SyncedCoordinatedReader{
 		coordinator: &kafka.Client{
@@ -342,13 +349,14 @@ func (cr *JoinedCoordinatedReader) SyncGroup(ctx context.Context) (*SyncedCoordi
 			ProtocolName:    sgresp.ProtocolName,
 			GroupInstanceID: cr.stateVector.GroupInstanceID,
 		},
-		offsets:     offsets,
-		assignments: sgresp.Assignment.AssignedPartitions,
+		offsets:         offsets,
+		assignments:     sgresp.Assignment.AssignedPartitions,
+		assignmentCount: assignmentCount,
 	}, nil
 }
 
 func (cr *SyncedCoordinatedReader) FetchMessages(ctx context.Context) ([]*kafka.Message, error) {
-	messages := make([]*kafka.Message, 0, len(cr.assignments)*1024)
+	messages := make([][]*kafka.Message, 0, cr.assignmentCount)
 
 	for topic, partitions := range cr.assignments {
 		for _, partition := range partitions {
@@ -370,42 +378,62 @@ func (cr *SyncedCoordinatedReader) FetchMessages(ctx context.Context) ([]*kafka.
 				return nil, err
 			}
 
-			for {
-				rec, err := fresp.Records.ReadRecord()
+			efr := EnhancedFetchResponse{fresp}
 
-				if err == io.EOF {
-					break
-				}
+			contents, err := efr.ReadMessages()
 
-				if err != nil {
-					return nil, err
-				}
-
-				key, err := io.ReadAll(rec.Key)
-
-				if err != nil {
-					return nil, err
-				}
-
-				val, err := io.ReadAll(rec.Value)
-
-				if err != nil {
-					return nil, err
-				}
-
-				messages = append(messages, &kafka.Message{
-					Topic:         topic,
-					Partition:     partition,
-					Offset:        rec.Offset,
-					HighWaterMark: fresp.HighWatermark,
-					Key:           key,
-					Value:         val,
-					Headers:       rec.Headers,
-					WriterData:    nil,
-					Time:          rec.Time,
-				})
+			if err != nil {
+				return nil, err
 			}
+
+			messages = append(messages, contents)
 		}
+	}
+
+	return slices.Concat(messages...), nil
+}
+
+type EnhancedFetchResponse struct {
+	*kafka.FetchResponse
+}
+
+func (r *EnhancedFetchResponse) ReadMessages() ([]*kafka.Message, error) {
+	messages := make([]*kafka.Message, 0, 128)
+
+	for {
+		rec, err := r.Records.ReadRecord()
+
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			return nil, err
+		}
+
+		key, err := io.ReadAll(rec.Key)
+
+		if err != nil {
+			return nil, err
+		}
+
+		val, err := io.ReadAll(rec.Value)
+
+		if err != nil {
+			return nil, err
+		}
+
+		messages = append(messages, &kafka.Message{
+			Topic:         r.Topic,
+			Partition:     r.Partition,
+			Offset:        rec.Offset,
+			HighWaterMark: r.HighWatermark,
+			Key:           key,
+			Value:         val,
+			Headers:       rec.Headers,
+			WriterData:    nil,
+			Time:          rec.Time,
+		})
 	}
 
 	return messages, nil
