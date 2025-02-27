@@ -374,84 +374,74 @@ func (cr *JoinedCoordinatedReader) SyncGroup(ctx context.Context) (*SyncedCoordi
 }
 
 func (cr *SyncedCoordinatedReader) FetchMessages(ctx context.Context) ([]*kafka.Message, error) {
-	messages := make([][]*kafka.Message, 0, cr.assignmentCount)
-
-	for topic, partitions := range cr.assignments {
-		for _, partition := range partitions {
-			fresp, err := cr.coordinator.Fetch(ctx, &kafka.FetchRequest{
-				Topic:          topic,
-				Partition:      partition,
-				Offset:         cr.offsets[topic][partition],
-				MinBytes:       1,
-				MaxBytes:       1024 * 1024,
-				MaxWait:        1 * time.Second,
-				IsolationLevel: kafka.ReadCommitted,
-			})
-
-			if err != nil {
-				return nil, err
-			}
-
-			if fresp.Error != nil {
-				return nil, err
-			}
-
-			efr := EnhancedFetchResponse{fresp}
-
-			contents, err := efr.ReadMessages()
-
-			if err != nil {
-				return nil, err
-			}
-
-			messages = append(messages, contents)
-		}
+	fmreq := &kafka.FetchRequestMulti{
+		TopicPartitionOffset: cr.offsets,
+		MinBytes:             1,
+		MaxBytes:             1024 * 1024,
+		MaxWait:              2 * time.Second,
+		IsolationLevel:       kafka.ReadCommitted,
 	}
 
-	return slices.Concat(messages...), nil
+	fmresp, err := cr.coordinator.FetchMulti(ctx, fmreq)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if fmresp.Error != nil {
+		return nil, fmresp.Error
+	}
+
+	return EnhancedMultiFetchResponse(*fmresp).ReadMessages()
 }
 
-type EnhancedFetchResponse struct {
-	*kafka.FetchResponse
-}
+type EnhancedMultiFetchResponse kafka.FetchResponseMulti
 
-func (r *EnhancedFetchResponse) ReadMessages() ([]*kafka.Message, error) {
+func (r EnhancedMultiFetchResponse) ReadMessages() ([]*kafka.Message, error) {
 	messages := make([]*kafka.Message, 0, 128)
 
-	for {
-		rec, err := r.Records.ReadRecord()
+	for topic, contents := range r.Records {
+		for partition, records := range contents {
+			if r.Errors[topic][partition] != nil {
+				return nil, r.Errors[topic][partition]
+			}
 
-		if err == io.EOF {
-			break
+			for {
+				rec, err := records.ReadRecord()
+
+				if err == io.EOF {
+					break
+				}
+
+				if err != nil {
+					return nil, err
+				}
+
+				key, err := io.ReadAll(rec.Key)
+
+				if err != nil {
+					return nil, err
+				}
+
+				val, err := io.ReadAll(rec.Value)
+
+				if err != nil {
+					return nil, err
+				}
+
+				messages = append(messages, &kafka.Message{
+					Topic:         topic,
+					Partition:     partition,
+					Offset:        rec.Offset,
+					HighWaterMark: r.HighWatermark[topic][partition],
+					Key:           key,
+					Value:         val,
+					Headers:       rec.Headers,
+					WriterData:    nil,
+					Time:          rec.Time,
+				})
+			}
 		}
-
-		if err != nil {
-			return nil, err
-		}
-
-		key, err := io.ReadAll(rec.Key)
-
-		if err != nil {
-			return nil, err
-		}
-
-		val, err := io.ReadAll(rec.Value)
-
-		if err != nil {
-			return nil, err
-		}
-
-		messages = append(messages, &kafka.Message{
-			Topic:         r.Topic,
-			Partition:     r.Partition,
-			Offset:        rec.Offset,
-			HighWaterMark: r.HighWatermark,
-			Key:           key,
-			Value:         val,
-			Headers:       rec.Headers,
-			WriterData:    nil,
-			Time:          rec.Time,
-		})
 	}
 
 	return messages, nil
