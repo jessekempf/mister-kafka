@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -55,122 +56,29 @@ func NewConsumer[T any](broker net.Addr, consumerGroup string, topic core.Consum
 // Consume consumes messages containing Ts, passing each to the provided handle callback. Runs in the
 // caller's thread. Returns on first error.
 func (c *Consumer[T]) Consume(ctx context.Context, handle func(*core.InboundMessage[T]) error) error {
-	dgresp, err := c.client.DescribeGroups(ctx, &kafka.DescribeGroupsRequest{GroupIDs: []string{c.groupID}})
+	var syncedReader *SyncedCoordinatedReader
+
+	cr1, err := NewCoordinatedReader(ctx, c.client.Addr, c.groupID)
 
 	if err != nil {
 		return err
 	}
 
-	log.Println(spew.Sdump(dgresp))
+	cr2, err := cr1.JoinGroup(ctx, []string{c.topic.Name()})
 
-	//
-	//
-	//
+	if err != nil {
+		return err
+	}
+
+	syncedReader, err = cr2.SyncGroup(ctx)
+
+	if err != nil {
+		return err
+	}
 
 	sc := make(chan os.Signal, 1)
 
 	signal.Notify(sc, syscall.SIGINT)
-
-	resp, err := c.client.FindCoordinator(ctx, &kafka.FindCoordinatorRequest{
-		Key:     c.groupID,
-		KeyType: kafka.CoordinatorKeyTypeConsumer,
-	})
-
-	if err != nil {
-		return err
-	}
-
-	if resp.Error != nil {
-		return resp.Error
-	}
-
-	hostname, err := os.Hostname()
-
-	if err != nil {
-		return err
-	}
-
-	groupBalancers := []kafka.GroupBalancer{
-		kafka.RoundRobinGroupBalancer{},
-	}
-
-	groupProtocols := []kafka.GroupProtocol{}
-
-	for _, balancer := range groupBalancers {
-		userData, err := balancer.UserData()
-
-		if err != nil {
-			return fmt.Errorf("unable to construct protocol metadata for member, %v: %v", balancer.ProtocolName(), err)
-		}
-
-		groupProtocols = append(groupProtocols, kafka.GroupProtocol{
-			Name: balancer.ProtocolName(),
-			Metadata: kafka.GroupProtocolSubscription{
-				Topics:   []string{c.topic.Name()},
-				UserData: userData,
-			},
-		},
-		)
-	}
-
-	jgreq := &kafka.JoinGroupRequest{
-		GroupID:          c.groupID,
-		SessionTimeout:   30 * time.Second,
-		RebalanceTimeout: 30 * time.Second,
-		GroupInstanceID:  hostname,
-		Protocols:        groupProtocols,
-		Addr:             nil,
-		MemberID:         "",
-		ProtocolType:     "consumer",
-	}
-
-	log.Println(spew.Sdump(jgreq))
-
-	jgresp, err := c.client.JoinGroup(ctx, jgreq)
-
-	if err != nil {
-		return err
-	}
-
-	if jgresp.Error != nil {
-		return jgresp.Error
-	}
-
-	log.Printf("%#v\n", jgresp)
-
-	log.Printf("joined %s as member %s (leader? %t)\n", jgreq.GroupID, jgresp.MemberID, jgresp.MemberID == jgresp.LeaderID)
-
-	log.Println(spew.Sdump(jgresp))
-
-	dgresp, err = c.client.DescribeGroups(ctx, &kafka.DescribeGroupsRequest{GroupIDs: []string{c.groupID}})
-
-	if err != nil {
-		return err
-	}
-
-	log.Println(spew.Sdump(dgresp))
-
-	sgresp, err := c.client.SyncGroup(ctx, &kafka.SyncGroupRequest{
-		GroupID:      jgreq.GroupID,
-		GenerationID: jgresp.GenerationID,
-		MemberID:     jgresp.MemberID,
-		ProtocolType: jgresp.ProtocolType,
-		ProtocolName: jgresp.ProtocolName,
-	})
-
-	if err != nil {
-		return err
-	}
-
-	log.Println(spew.Sdump(sgresp))
-
-	dgresp, err = c.client.DescribeGroups(ctx, &kafka.DescribeGroupsRequest{GroupIDs: []string{c.groupID}})
-
-	if err != nil {
-		return err
-	}
-
-	log.Println(spew.Sdump(dgresp))
 
 	for {
 		select {
@@ -181,19 +89,7 @@ func (c *Consumer[T]) Consume(ctx context.Context, handle func(*core.InboundMess
 				log.Printf("closing Kafka session returned: %v\n", err)
 			}
 
-			lgresp, err := c.client.LeaveGroup(ctx, &kafka.LeaveGroupRequest{
-				GroupID: jgreq.GroupID,
-				Members: []kafka.LeaveGroupRequestMember{
-					{
-						ID:              jgresp.MemberID,
-						GroupInstanceID: jgreq.GroupInstanceID,
-					},
-				},
-			})
-
-			log.Printf("%+v / %+v\n", lgresp, err)
-
-			return nil
+			return syncedReader.LeaveGroup(ctx)
 		default:
 			timeoutCtx, timeoutCancel := context.WithTimeout(ctx, time.Second)
 
@@ -221,148 +117,51 @@ func (c *Consumer[T]) Consume(ctx context.Context, handle func(*core.InboundMess
 					return err
 				}
 
-				c.reader.CommitMessages(ctx, msg)
+				err = c.reader.CommitMessages(ctx, msg)
+				if err != nil {
+					return err
+				}
 			}
 
-			messages := make([]*core.InboundMessage[T], 0, 1024)
-
-			ofresp, err := c.client.OffsetFetch(ctx, &kafka.OffsetFetchRequest{
-				GroupID: c.groupID,
-				Topics:  sgresp.Assignment.AssignedPartitions,
-			})
+			msgs, err := syncedReader.FetchMessages(ctx)
 
 			if err != nil {
 				return err
 			}
 
-			if ofresp.Error != nil {
-				return err
-			}
+			messages := make([]*core.InboundMessage[T], 0, len(msgs))
 
-			offsets := make(map[string]map[int]int64)
-
-			for topic := range ofresp.Topics {
-				for _, partitionInfo := range ofresp.Topics[topic] {
-					if offsets[topic] == nil {
-						offsets[topic] = make(map[int]int64)
-					}
-
-					offsets[topic][partitionInfo.Partition] = partitionInfo.CommittedOffset
-				}
-			}
-
-			log.Printf("offset table: %#v\n", offsets)
-
-			for _, partition := range sgresp.Assignment.AssignedPartitions[c.topic.Name()] {
-				fresp, err := c.client.Fetch(ctx, &kafka.FetchRequest{
-					Topic:          c.topic.Name(),
-					Partition:      partition,
-					Offset:         offsets[c.topic.Name()][partition],
-					MinBytes:       0,
-					MaxBytes:       0,
-					MaxWait:        1 * time.Second,
-					IsolationLevel: kafka.ReadCommitted,
-				})
+			for _, message := range msgs {
+				im, err := c.topic.DecodeMessage(message)
 
 				if err != nil {
 					return err
 				}
 
-				if fresp.Error != nil {
-					return err
-				}
+				messages = append(messages, im)
+			}
 
-				for {
-					rec, err := fresp.Records.ReadRecord()
-
-					if err == io.EOF {
-						break
-					}
-
-					if err != nil {
-						return err
-					}
-
-					var key []byte
-					var val []byte
-
-					_, err = rec.Key.Read(key)
-
-					if err != nil {
-						return err
-					}
-
-					_, err = rec.Value.Read(val)
-
-					if err != nil {
-						return err
-					}
-
-					decoded, err := c.topic.DecodeMessage(&kafka.Message{
-						Topic:         c.topic.Name(),
-						Partition:     partition,
-						Offset:        rec.Offset,
-						HighWaterMark: fresp.HighWatermark,
-						Key:           key,
-						Value:         val,
-						Headers:       rec.Headers,
-						WriterData:    nil,
-						Time:          rec.Time,
-					})
-
-					if err != nil {
-						return err
-					}
-
-					messages = append(messages, decoded)
-				}
-
-				offsetsToCommit := make(map[string][]kafka.OffsetCommit)
-
-				for _, message := range messages {
-					err := handle(message)
-					if err != nil {
-						return err
-					}
-
-					offsetsToCommit[message.Topic] = append(offsetsToCommit[message.Topic], kafka.OffsetCommit{
-						Partition: message.Partition,
-						Offset:    message.Offset + 1,
-					})
-				}
-
-				ocresp, err := c.client.OffsetCommit(ctx, &kafka.OffsetCommitRequest{
-					GroupID:      c.groupID,
-					GenerationID: jgresp.GenerationID,
-					MemberID:     jgresp.MemberID,
-					InstanceID:   jgreq.GroupInstanceID,
-					Topics:       offsetsToCommit,
-				})
-
+			for _, message := range messages {
+				err := handle(message)
 				if err != nil {
 					return err
 				}
-
-				for _, offsetCommit := range ocresp.Topics[c.topic.Name()] {
-					log.Printf("committed offsets for %s, returned %w\n", offsetCommit.Partition, offsetCommit.Error)
-				}
 			}
 
-			hbreq := &kafka.HeartbeatRequest{
-				GroupID:         c.groupID,
-				GenerationID:    int32(jgresp.GenerationID),
-				MemberID:        jgresp.MemberID,
-				GroupInstanceID: jgreq.GroupInstanceID,
-			}
-
-			hbresp, err := c.client.Heartbeat(ctx, hbreq)
+			err = syncedReader.CommitMessages(ctx, msgs)
 
 			if err != nil {
-				return err
-			}
+				if errors.Is(err, kafka.IllegalGeneration) {
+					log.Printf("caught illegal generation error, resyncing.")
+					syncedReader, err = cr2.SyncGroup(ctx)
+					if err != nil {
+						return err
+					}
 
-			if hbresp.Error != nil {
-				return hbresp.Error
+					continue
+				}
+
+				return err
 			}
 		}
 	}
@@ -410,13 +209,11 @@ func NewCoordinatedReader(ctx context.Context, bootstrap net.Addr, group string)
 		return nil, resp.Error
 	}
 
-	addr, err := net.ResolveTCPAddr("tcp", resp.Coordinator.Host)
+	addr, err := net.ResolveTCPAddr("tcp", net.JoinHostPort(resp.Coordinator.Host, fmt.Sprintf("%d", resp.Coordinator.Port)))
 
 	if err != nil {
 		return nil, err
 	}
-
-	addr.Port = resp.Coordinator.Port
 
 	return &InitialCoordinatedReader{
 		group:       group,
@@ -433,7 +230,7 @@ func (cr *InitialCoordinatedReader) JoinGroup(ctx context.Context, topics []stri
 
 	if len(groupBalancers) == 0 {
 		groupBalancers = []kafka.GroupBalancer{
-			kafka.RangeGroupBalancer{},
+			// kafka.RangeGroupBalancer{},
 			kafka.RoundRobinGroupBalancer{},
 		}
 	}
@@ -478,7 +275,9 @@ func (cr *InitialCoordinatedReader) JoinGroup(ctx context.Context, topics []stri
 	}
 
 	return &JoinedCoordinatedReader{
-		coordinator: cr.coordinator,
+		coordinator: &kafka.Client{
+			Addr: cr.coordinator.Addr,
+		},
 		stateVector: StateVector{
 			GroupID:         req.GroupID,
 			GenerationID:    resp.GenerationID,
@@ -492,11 +291,12 @@ func (cr *InitialCoordinatedReader) JoinGroup(ctx context.Context, topics []stri
 
 func (cr *JoinedCoordinatedReader) SyncGroup(ctx context.Context) (*SyncedCoordinatedReader, error) {
 	sgresp, err := cr.coordinator.SyncGroup(ctx, &kafka.SyncGroupRequest{
-		GroupID:      cr.stateVector.GroupID,
-		GenerationID: cr.stateVector.GenerationID,
-		MemberID:     cr.stateVector.MemberID,
-		ProtocolType: cr.stateVector.ProtocolType,
-		ProtocolName: cr.stateVector.ProtocolName,
+		GroupID:         cr.stateVector.GroupID,
+		GenerationID:    cr.stateVector.GenerationID,
+		MemberID:        cr.stateVector.MemberID,
+		GroupInstanceID: cr.stateVector.GroupInstanceID,
+		ProtocolType:    cr.stateVector.ProtocolType,
+		ProtocolName:    cr.stateVector.ProtocolName,
 	})
 
 	if err != nil {
@@ -511,6 +311,8 @@ func (cr *JoinedCoordinatedReader) SyncGroup(ctx context.Context) (*SyncedCoordi
 	if err != nil {
 		return nil, err
 	}
+
+	log.Println(spew.Sdump(ofresp))
 
 	if ofresp.Error != nil {
 		return nil, err
@@ -529,13 +331,16 @@ func (cr *JoinedCoordinatedReader) SyncGroup(ctx context.Context) (*SyncedCoordi
 	}
 
 	return &SyncedCoordinatedReader{
-		coordinator: &kafka.Client{},
+		coordinator: &kafka.Client{
+			Addr: cr.coordinator.Addr,
+		},
 		stateVector: StateVector{
-			GroupID:      cr.stateVector.GroupID,
-			GenerationID: cr.stateVector.GenerationID,
-			MemberID:     cr.stateVector.MemberID,
-			ProtocolType: sgresp.ProtocolType,
-			ProtocolName: sgresp.ProtocolName,
+			GroupID:         cr.stateVector.GroupID,
+			GenerationID:    cr.stateVector.GenerationID,
+			MemberID:        cr.stateVector.MemberID,
+			ProtocolType:    sgresp.ProtocolType,
+			ProtocolName:    sgresp.ProtocolName,
+			GroupInstanceID: cr.stateVector.GroupInstanceID,
 		},
 		offsets:     offsets,
 		assignments: sgresp.Assignment.AssignedPartitions,
@@ -552,7 +357,7 @@ func (cr *SyncedCoordinatedReader) FetchMessages(ctx context.Context) ([]*kafka.
 				Partition:      partition,
 				Offset:         cr.offsets[topic][partition],
 				MinBytes:       0,
-				MaxBytes:       0,
+				MaxBytes:       1024 * 1024,
 				MaxWait:        1 * time.Second,
 				IsolationLevel: kafka.ReadCommitted,
 			})
@@ -576,16 +381,13 @@ func (cr *SyncedCoordinatedReader) FetchMessages(ctx context.Context) ([]*kafka.
 					return nil, err
 				}
 
-				var key []byte
-				var val []byte
-
-				_, err = rec.Key.Read(key)
+				key, err := io.ReadAll(rec.Key)
 
 				if err != nil {
 					return nil, err
 				}
 
-				_, err = rec.Value.Read(val)
+				val, err := io.ReadAll(rec.Value)
 
 				if err != nil {
 					return nil, err
@@ -610,43 +412,59 @@ func (cr *SyncedCoordinatedReader) FetchMessages(ctx context.Context) ([]*kafka.
 }
 
 func (cr *SyncedCoordinatedReader) CommitMessages(ctx context.Context, messages []*kafka.Message) error {
-	if len(messages) == 0 {
-		hbreq := &kafka.HeartbeatRequest{
-			GroupID:         cr.stateVector.GroupID,
-			GenerationID:    int32(cr.stateVector.GenerationID),
-			MemberID:        cr.stateVector.MemberID,
-			GroupInstanceID: cr.stateVector.GroupInstanceID,
+	newOffsets := make(map[string]map[int]int64, len(cr.offsets))
+
+	for _, message := range messages {
+		if newOffsets[message.Topic] == nil {
+			newOffsets[message.Topic] = make(map[int]int64, len(cr.offsets[message.Topic]))
 		}
 
-		hbresp, err := cr.coordinator.Heartbeat(ctx, hbreq)
+		newOffsets[message.Topic][message.Partition] = message.Offset + 1
+
+	}
+
+	if len(newOffsets) > 0 {
+		err := cr.OffsetCommit(ctx, newOffsets)
 
 		if err != nil {
 			return err
 		}
 
-		if hbresp.Error != nil {
-			return hbresp.Error
+		for topic, partitionOffsets := range newOffsets {
+			for partition, offset := range partitionOffsets {
+				cr.offsets[topic][partition] = offset
+			}
 		}
-
 		return nil
+	} else {
+		return cr.Heartbeat(ctx)
 	}
+}
 
+func (cr *SyncedCoordinatedReader) OffsetCommit(ctx context.Context, newOffsets map[string]map[int]int64) error {
 	offsetsToCommit := make(map[string][]kafka.OffsetCommit)
 
-	for _, message := range messages {
-		offsetsToCommit[message.Topic] = append(offsetsToCommit[message.Topic], kafka.OffsetCommit{
-			Partition: message.Partition,
-			Offset:    message.Offset + 1,
-		})
+	for topic, partitionOffsets := range newOffsets {
+		for partition, offset := range partitionOffsets {
+			if offset != cr.offsets[topic][partition] {
+				offsetsToCommit[topic] = append(offsetsToCommit[topic], kafka.OffsetCommit{
+					Partition: partition,
+					Offset:    offset,
+				})
+
+			}
+		}
 	}
 
-	ocresp, err := cr.coordinator.OffsetCommit(ctx, &kafka.OffsetCommitRequest{
+	ocreq := &kafka.OffsetCommitRequest{
 		GroupID:      cr.stateVector.GroupID,
 		GenerationID: cr.stateVector.GenerationID,
 		MemberID:     cr.stateVector.MemberID,
-		InstanceID:   cr.stateVector.GroupID,
+		InstanceID:   cr.stateVector.GroupInstanceID,
 		Topics:       offsetsToCommit,
-	})
+	}
+
+	ocresp, err := cr.coordinator.OffsetCommit(ctx, ocreq)
 
 	if err != nil {
 		return err
@@ -654,11 +472,45 @@ func (cr *SyncedCoordinatedReader) CommitMessages(ctx context.Context, messages 
 
 	for topic, partitionCommits := range ocresp.Topics {
 		for _, offsetCommit := range partitionCommits {
-			log.Printf("committed offsets for %s/%s, returned %w\n", topic, offsetCommit.Partition, offsetCommit.Error)
+			if offsetCommit.Error != nil {
+				return offsetCommit.Error
+			}
+
+			log.Printf(
+				"committed offset %d for %s %s/%d\n",
+				newOffsets[topic][offsetCommit.Partition],
+				cr.stateVector.MemberID,
+				topic,
+				offsetCommit.Partition,
+			)
 		}
 	}
-
 	return nil
+}
+
+func (cr *SyncedCoordinatedReader) Heartbeat(ctx context.Context) error {
+	hbreq := &kafka.HeartbeatRequest{
+		GroupID:         cr.stateVector.GroupID,
+		GenerationID:    int32(cr.stateVector.GenerationID),
+		MemberID:        cr.stateVector.MemberID,
+		GroupInstanceID: cr.stateVector.GroupInstanceID,
+	}
+
+	hbresp, err := cr.coordinator.Heartbeat(ctx, hbreq)
+
+	if err != nil {
+		return err
+	}
+
+	log.Printf(
+		"SyncedCoordinatedReader.Heartbeat(): sent heartbeat on %s (GenID: %d; MemberID: %s; InstanceID: %s)\n",
+		hbreq.GroupID,
+		hbreq.GenerationID,
+		hbreq.MemberID,
+		hbreq.GroupInstanceID,
+	)
+
+	return hbresp.Error
 }
 
 func (cr *SyncedCoordinatedReader) LeaveGroup(ctx context.Context) error {
