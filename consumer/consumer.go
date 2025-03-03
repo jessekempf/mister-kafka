@@ -96,11 +96,11 @@ func (c *Consumer[T]) Consume(ctx context.Context, handle func(*core.InboundMess
 				return err
 			}
 
-			messages := make([]*core.InboundMessage[T], 0, len(msgs))
-
-			if len(messages) == 0 {
+			if len(msgs) == 0 {
 				err = synced.Heartbeat(ctx)
 			} else {
+				messages := make([]*core.InboundMessage[T], 0, len(msgs))
+
 				for _, message := range msgs {
 					im, err := c.topic.DecodeMessage(message)
 
