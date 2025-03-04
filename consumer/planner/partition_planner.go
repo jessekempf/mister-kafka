@@ -6,6 +6,8 @@ import (
 	"github.com/jessekempf/mister-kafka/core"
 )
 
+// PartitionPlanner builds an execution plan to process messages in the natural Kafka order. That is,
+// partitions are handled simultaneously, while messages within a partition are handled sequentially.
 func PartitionPlanner[T any](messages []*core.InboundMessage[T]) (*ExecutionPlan[T], error) {
 	type partition struct {
 		lastOffset int64
