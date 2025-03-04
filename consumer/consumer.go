@@ -7,9 +7,11 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/jessekempf/mister-kafka/consumer/internal"
+	"github.com/jessekempf/mister-kafka/consumer/planner"
 	"github.com/jessekempf/mister-kafka/core"
 	"github.com/segmentio/kafka-go"
 )
@@ -19,9 +21,13 @@ type Consumer[T any] struct {
 	topic   core.ConsumerTopic[T]
 	groupID string
 	client  *kafka.Client
+	planner planner.Planner[T]
 }
 
 // NewConsumer creates Consumer[T]s from a broker address, consumer group, topic, and decoder.
+//
+// Consumers have the following configurables with sane defaults:
+// - Planner: The Partition Planner is used if a custom one is not otherwise provided.
 func NewConsumer[T any](broker net.Addr, consumerGroup string, topic core.ConsumerTopic[T]) *Consumer[T] {
 	return &Consumer[T]{
 		topic: topic,
@@ -29,12 +35,23 @@ func NewConsumer[T any](broker net.Addr, consumerGroup string, topic core.Consum
 			Addr: broker,
 		},
 		groupID: consumerGroup,
+		planner: planner.PartitionPlanner[T],
+	}
+}
+
+// WithPlanner returns a new Consumer[T] with a non-default planner set.
+func (c *Consumer[T]) WithPlanner(planner planner.Planner[T]) *Consumer[T] {
+	return &Consumer[T]{
+		topic:   c.topic,
+		groupID: c.groupID,
+		client:  c.client,
+		planner: planner,
 	}
 }
 
 // Consume consumes messages containing Ts, passing each to the provided handle callback. Runs in the
 // caller's thread. Returns on first error.
-func (c *Consumer[T]) Consume(ctx context.Context, handle func(*core.InboundMessage[T]) error) error {
+func (c *Consumer[T]) Consume(ctx context.Context, handle func(ctx context.Context, message *core.InboundMessage[T]) error) error {
 	var initial *internal.InitialCoordinatedReader
 	var joined *internal.JoinedCoordinatedReader
 	var synced *internal.SyncedCoordinatedReader
@@ -49,7 +66,7 @@ func (c *Consumer[T]) Consume(ctx context.Context, handle func(*core.InboundMess
 		return
 	}
 
-	sync := func() (err error) {
+	resync := func() (err error) {
 		synced, err = joined.SyncGroup(ctx)
 		return
 	}
@@ -74,7 +91,7 @@ func (c *Consumer[T]) Consume(ctx context.Context, handle func(*core.InboundMess
 		}
 
 		if synced == nil {
-			if err := sync(); err != nil {
+			if err := resync(); err != nil {
 				return err
 			}
 
@@ -96,6 +113,7 @@ func (c *Consumer[T]) Consume(ctx context.Context, handle func(*core.InboundMess
 			if len(msgs) == 0 {
 				err = synced.Heartbeat(ctx)
 			} else {
+				var plan *planner.ExecutionPlan[T]
 				messages := make([]*core.InboundMessage[T], 0, len(msgs))
 
 				for _, message := range msgs {
@@ -108,11 +126,16 @@ func (c *Consumer[T]) Consume(ctx context.Context, handle func(*core.InboundMess
 					messages = append(messages, im)
 				}
 
-				for _, message := range messages {
-					err := handle(message)
-					if err != nil {
-						return err
-					}
+				plan, err = c.planner(messages)
+
+				if err != nil {
+					return err
+				}
+
+				err = executePlan(ctx, plan, handle)
+
+				if err != nil {
+					return err
 				}
 
 				err = synced.CommitMessages(ctx, msgs)
@@ -130,4 +153,30 @@ func (c *Consumer[T]) Consume(ctx context.Context, handle func(*core.InboundMess
 			}
 		}
 	}
+}
+
+func executePlan[T any](ctx context.Context, plan *planner.ExecutionPlan[T], handle func(context.Context, *core.InboundMessage[T]) error) error {
+	errChan := make(chan error, len(plan.InParallel()))
+	executors := sync.WaitGroup{}
+
+	for _, sequence := range plan.InParallel() {
+		executors.Add(1)
+
+		go func() {
+			for _, message := range sequence.InOrder() {
+				err := handle(ctx, message)
+				if err != nil {
+					errChan <- err
+					break
+				}
+			}
+			executors.Done()
+		}()
+	}
+
+	executors.Wait()
+
+	errs := make([]error, 0, len(errChan))
+
+	return errors.Join(errs...)
 }
