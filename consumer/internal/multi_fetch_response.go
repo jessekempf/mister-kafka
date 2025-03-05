@@ -6,19 +6,19 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
-type EnhancedMultiFetchResponse kafka.FetchResponseMulti
+type EnhancedFetchResponse kafka.FetchResponse
 
-func (r EnhancedMultiFetchResponse) ReadMessages() ([]*kafka.Message, error) {
+func (r EnhancedFetchResponse) ReadMessages(offsets map[string]map[int]int64) ([]*kafka.Message, error) {
 	messages := make([]*kafka.Message, 0, 128)
 
-	for topic, contents := range r.Records {
-		for partition, records := range contents {
-			if r.Errors[topic][partition] != nil {
-				return nil, r.Errors[topic][partition]
+	for _, topic := range r.Topics {
+		for _, partition := range topic.Partitions {
+			if partition.Error != nil {
+				return nil, partition.Error
 			}
 
 			for {
-				rec, err := records.ReadRecord()
+				rec, err := partition.Records.ReadRecord()
 
 				if err == io.EOF {
 					break
@@ -26,6 +26,10 @@ func (r EnhancedMultiFetchResponse) ReadMessages() ([]*kafka.Message, error) {
 
 				if err != nil {
 					return nil, err
+				}
+
+				if rec.Offset < offsets[topic.Topic][partition.Partition] {
+					continue
 				}
 
 				key, err := io.ReadAll(rec.Key)
@@ -41,10 +45,10 @@ func (r EnhancedMultiFetchResponse) ReadMessages() ([]*kafka.Message, error) {
 				}
 
 				messages = append(messages, &kafka.Message{
-					Topic:         topic,
-					Partition:     partition,
+					Topic:         topic.Topic,
+					Partition:     partition.Partition,
 					Offset:        rec.Offset,
-					HighWaterMark: r.HighWatermark[topic][partition],
+					HighWaterMark: partition.HighWatermark,
 					Key:           key,
 					Value:         val,
 					Headers:       rec.Headers,

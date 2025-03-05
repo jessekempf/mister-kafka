@@ -13,3 +13,5 @@ require (
 	github.com/segmentio/kafka-go v0.4.47 // direct
 	github.com/stretchr/testify v1.10.0
 )
+
+replace github.com/segmentio/kafka-go => ../kafka-go

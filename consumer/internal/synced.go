@@ -17,15 +17,34 @@ type SyncedCoordinatedReader struct {
 }
 
 func (cr *SyncedCoordinatedReader) FetchMessages(ctx context.Context) ([]*kafka.Message, error) {
-	fmreq := &kafka.FetchRequestMulti{
-		TopicPartitionOffset: cr.offsets,
-		MinBytes:             1,
-		MaxBytes:             1024 * 1024,
-		MaxWait:              2 * time.Second,
-		IsolationLevel:       kafka.ReadCommitted,
+	topics := make([]kafka.FetchRequestTopic, 0, len(cr.offsets))
+
+	for topic, partitions := range cr.offsets {
+		reqPartitions := make([]kafka.FetchRequestPartition, 0, len(partitions))
+
+		for partition, offset := range partitions {
+			reqPartitions = append(reqPartitions, kafka.FetchRequestPartition{
+				Partition: partition,
+				Offset:    offset,
+				MaxBytes:  1024 * 1024,
+			})
+		}
+
+		topics = append(topics, kafka.FetchRequestTopic{
+			Topic:      topic,
+			Partitions: reqPartitions,
+		})
 	}
 
-	fmresp, err := cr.coordinator.FetchMulti(ctx, fmreq)
+	fmreq := &kafka.FetchRequest{
+		MinBytes:       1,
+		MaxBytes:       1024 * 1024,
+		MaxWait:        2 * time.Second,
+		IsolationLevel: kafka.ReadCommitted,
+		Topics:         topics,
+	}
+
+	fmresp, err := cr.coordinator.Fetch(ctx, fmreq)
 
 	if err != nil {
 		return nil, err
@@ -35,7 +54,7 @@ func (cr *SyncedCoordinatedReader) FetchMessages(ctx context.Context) ([]*kafka.
 		return nil, fmresp.Error
 	}
 
-	return EnhancedMultiFetchResponse(*fmresp).ReadMessages()
+	return EnhancedFetchResponse(*fmresp).ReadMessages(cr.offsets)
 }
 
 func (cr *SyncedCoordinatedReader) CommitMessages(ctx context.Context, messages []*kafka.Message) error {
