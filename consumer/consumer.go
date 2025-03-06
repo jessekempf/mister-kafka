@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/jessekempf/mister-kafka/consumer/internal"
 	"github.com/jessekempf/mister-kafka/consumer/planner"
@@ -104,7 +105,13 @@ func (c *Consumer[T]) Consume(ctx context.Context, handle func(ctx context.Conte
 
 			return synced.LeaveGroup(ctx)
 		default:
-			msgs, err := synced.FetchMessages(ctx)
+			msgs, err := synced.FetchMessages(ctx, internal.FetchConfig{
+				MinBytes:          1024,
+				MaxBytes:          50 * 1024 * 1024,
+				PartitionMaxBytes: 1024 * 1024,
+				MaxWait:           10 * time.Second,
+				IsolationLevel:    kafka.ReadCommitted,
+			})
 
 			if err != nil {
 				return err

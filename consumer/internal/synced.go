@@ -16,7 +16,15 @@ type SyncedCoordinatedReader struct {
 	assignmentCount int
 }
 
-func (cr *SyncedCoordinatedReader) FetchMessages(ctx context.Context) ([]*kafka.Message, error) {
+type FetchConfig struct {
+	MinBytes          int32
+	MaxBytes          int32
+	PartitionMaxBytes int32
+	MaxWait           time.Duration
+	IsolationLevel    kafka.IsolationLevel
+}
+
+func (cr *SyncedCoordinatedReader) FetchMessages(ctx context.Context, cfg FetchConfig) ([]*kafka.Message, error) {
 	topics := make([]kafka.FetchRequestTopic, 0, len(cr.offsets))
 
 	for topic, partitions := range cr.offsets {
@@ -26,7 +34,7 @@ func (cr *SyncedCoordinatedReader) FetchMessages(ctx context.Context) ([]*kafka.
 			reqPartitions = append(reqPartitions, kafka.FetchRequestPartition{
 				Partition: partition,
 				Offset:    offset,
-				MaxBytes:  1024 * 1024,
+				MaxBytes:  cfg.PartitionMaxBytes,
 			})
 		}
 
@@ -37,9 +45,9 @@ func (cr *SyncedCoordinatedReader) FetchMessages(ctx context.Context) ([]*kafka.
 	}
 
 	fmreq := &kafka.FetchRequest{
-		MinBytes:       1,
-		MaxBytes:       1024 * 1024,
-		MaxWait:        2 * time.Second,
+		MinBytes:       cfg.MinBytes,
+		MaxBytes:       cfg.MaxBytes,
+		MaxWait:        cfg.MaxWait,
 		IsolationLevel: kafka.ReadCommitted,
 		Topics:         topics,
 	}
