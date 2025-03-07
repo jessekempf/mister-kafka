@@ -11,7 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jessekempf/mister-kafka/consumer/internal"
 	"github.com/jessekempf/mister-kafka/consumer/planner"
 	"github.com/jessekempf/mister-kafka/core"
 	"github.com/segmentio/kafka-go"
@@ -19,16 +18,19 @@ import (
 
 // Consumer is a Kafka consumer that consumes Ts.
 type Consumer[T any] struct {
-	topic   core.ConsumerTopic[T]
-	groupID string
-	client  *kafka.Client
-	planner planner.Planner[T]
+	topic       core.ConsumerTopic[T]
+	groupID     string
+	client      *kafka.Client
+	planner     planner.Planner[T]
+	fetchConfig FetchConfig[validated]
 }
 
 // NewConsumer creates Consumer[T]s from a broker address, consumer group, topic, and decoder.
 //
 // Consumers have the following configurables with sane defaults:
+//
 // - Planner: The Partition Planner is used if a custom one is not otherwise provided.
+// - FetchConfig: The default configuration, except for IsolationLevel being set to ReadCommitted, is used.
 func NewConsumer[T any](broker net.Addr, consumerGroup string, topic core.ConsumerTopic[T]) *Consumer[T] {
 	return &Consumer[T]{
 		topic: topic,
@@ -37,28 +39,47 @@ func NewConsumer[T any](broker net.Addr, consumerGroup string, topic core.Consum
 		},
 		groupID: consumerGroup,
 		planner: planner.PartitionPlanner[T],
+		fetchConfig: FetchConfig[validated]{
+			MinBytes:          1,
+			MaxBytes:          50 * 1024 * 1024,
+			PartitionMaxBytes: 1024 * 1024,
+			MaxWait:           10 * time.Second,
+			IsolationLevel:    kafka.ReadCommitted,
+		},
 	}
 }
 
 // WithPlanner returns a new Consumer[T] with a non-default planner set.
 func (c *Consumer[T]) WithPlanner(planner planner.Planner[T]) *Consumer[T] {
 	return &Consumer[T]{
-		topic:   c.topic,
-		groupID: c.groupID,
-		client:  c.client,
-		planner: planner,
+		topic:       c.topic,
+		groupID:     c.groupID,
+		client:      c.client,
+		planner:     planner,
+		fetchConfig: c.fetchConfig,
+	}
+}
+
+// WithFetchConfig returns a new Consumer[T] with a non-default fetch config set.
+func (c *Consumer[T]) WithFetchConfig(fetchConfig FetchConfig[validated]) *Consumer[T] {
+	return &Consumer[T]{
+		topic:       c.topic,
+		groupID:     c.groupID,
+		client:      c.client,
+		planner:     c.planner,
+		fetchConfig: fetchConfig,
 	}
 }
 
 // Consume consumes messages containing Ts, passing each to the provided handle callback. Runs in the
 // caller's thread. Returns on first error.
 func (c *Consumer[T]) Consume(ctx context.Context, handle func(ctx context.Context, message *core.InboundMessage[T]) error) error {
-	var initial *internal.InitialCoordinatedReader
-	var joined *internal.JoinedCoordinatedReader
-	var synced *internal.SyncedCoordinatedReader
+	var initial *initialCoordinatedReader
+	var joined *joinedCoordinatedReader
+	var synced *syncedCoordinatedReader
 
 	initialize := func() (err error) {
-		initial, err = internal.NewCoordinatedReader(ctx, c.client.Addr, c.groupID)
+		initial, err = newCoordinatedReader(ctx, c.client.Addr, c.groupID)
 		return
 	}
 
@@ -105,13 +126,7 @@ func (c *Consumer[T]) Consume(ctx context.Context, handle func(ctx context.Conte
 
 			return synced.LeaveGroup(ctx)
 		default:
-			msgs, err := synced.FetchMessages(ctx, internal.FetchConfig{
-				MinBytes:          1024,
-				MaxBytes:          50 * 1024 * 1024,
-				PartitionMaxBytes: 1024 * 1024,
-				MaxWait:           10 * time.Second,
-				IsolationLevel:    kafka.ReadCommitted,
-			})
+			msgs, err := synced.FetchMessages(ctx, c.fetchConfig)
 
 			if err != nil {
 				return err

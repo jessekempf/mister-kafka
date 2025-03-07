@@ -1,4 +1,4 @@
-package internal
+package consumer
 
 import (
 	"context"
@@ -10,12 +10,12 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
-type InitialCoordinatedReader struct {
+type initialCoordinatedReader struct {
 	group       string
 	coordinator *kafka.Client
 }
 
-func NewCoordinatedReader(ctx context.Context, bootstrap net.Addr, group string) (*InitialCoordinatedReader, error) {
+func newCoordinatedReader(ctx context.Context, bootstrap net.Addr, group string) (*initialCoordinatedReader, error) {
 	client := &kafka.Client{Addr: bootstrap}
 
 	resp, err := client.FindCoordinator(ctx, &kafka.FindCoordinatorRequest{
@@ -37,13 +37,13 @@ func NewCoordinatedReader(ctx context.Context, bootstrap net.Addr, group string)
 		return nil, err
 	}
 
-	return &InitialCoordinatedReader{
+	return &initialCoordinatedReader{
 		group:       group,
 		coordinator: &kafka.Client{Addr: addr},
 	}, nil
 }
 
-func (cr *InitialCoordinatedReader) JoinGroup(ctx context.Context, topics []string, groupBalancers ...kafka.GroupBalancer) (*JoinedCoordinatedReader, error) {
+func (cr *initialCoordinatedReader) JoinGroup(ctx context.Context, topics []string, groupBalancers ...kafka.GroupBalancer) (*joinedCoordinatedReader, error) {
 	hostname, err := os.Hostname()
 
 	if err != nil {
@@ -104,11 +104,11 @@ func (cr *InitialCoordinatedReader) JoinGroup(ctx context.Context, topics []stri
 		return nil, fmt.Errorf("coordinator assigned unsupported group balancer '%s'", resp.ProtocolName)
 	}
 
-	return &JoinedCoordinatedReader{
+	return &joinedCoordinatedReader{
 		coordinator: &kafka.Client{
 			Addr: cr.coordinator.Addr,
 		},
-		stateVector: StateVector{
+		stateVector: stateVector{
 			GroupID:         req.GroupID,
 			GenerationID:    resp.GenerationID,
 			MemberID:        resp.MemberID,

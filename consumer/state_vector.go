@@ -1,6 +1,6 @@
-package internal
+package consumer
 
-type StateVector struct {
+type stateVector struct {
 	GroupID         string
 	GenerationID    int
 	MemberID        string

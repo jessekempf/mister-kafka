@@ -1,4 +1,4 @@
-package internal
+package consumer
 
 import (
 	"context"
@@ -8,14 +8,14 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
-type JoinedCoordinatedReader struct {
+type joinedCoordinatedReader struct {
 	coordinator   *kafka.Client
-	stateVector   StateVector
+	stateVector   stateVector
 	groupBalancer kafka.GroupBalancer
 	groupMembers  []kafka.JoinGroupResponseMember
 }
 
-func (cr *JoinedCoordinatedReader) SyncGroup(ctx context.Context) (*SyncedCoordinatedReader, error) {
+func (cr *joinedCoordinatedReader) SyncGroup(ctx context.Context) (*syncedCoordinatedReader, error) {
 	assignments := []kafka.SyncGroupRequestAssignment{}
 
 	if len(cr.groupMembers) > 0 {
@@ -115,11 +115,11 @@ func (cr *JoinedCoordinatedReader) SyncGroup(ctx context.Context) (*SyncedCoordi
 		sgresp.Assignment.AssignedPartitions,
 	)
 
-	return &SyncedCoordinatedReader{
+	return &syncedCoordinatedReader{
 		coordinator: &kafka.Client{
 			Addr: cr.coordinator.Addr,
 		},
-		stateVector: StateVector{
+		stateVector: stateVector{
 			GroupID:         cr.stateVector.GroupID,
 			GenerationID:    cr.stateVector.GenerationID,
 			MemberID:        cr.stateVector.MemberID,

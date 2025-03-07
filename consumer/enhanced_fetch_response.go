@@ -1,4 +1,4 @@
-package internal
+package consumer
 
 import (
 	"io"
@@ -6,9 +6,9 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
-type EnhancedFetchResponse kafka.FetchResponse
+type enhancedFetchResponse kafka.FetchResponse
 
-func (r EnhancedFetchResponse) ReadMessages(offsets map[string]map[int]int64) ([]*kafka.Message, error) {
+func (r enhancedFetchResponse) ReadMessages(offsets map[string]map[int]int64) ([]*kafka.Message, error) {
 	messages := make([]*kafka.Message, 0, 128)
 
 	for _, topic := range r.Topics {

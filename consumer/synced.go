@@ -1,30 +1,21 @@
-package internal
+package consumer
 
 import (
 	"context"
 	"log"
-	"time"
 
 	"github.com/segmentio/kafka-go"
 )
 
-type SyncedCoordinatedReader struct {
+type syncedCoordinatedReader struct {
 	coordinator     *kafka.Client
-	stateVector     StateVector
+	stateVector     stateVector
 	offsets         map[string]map[int]int64
 	assignments     map[string][]int
 	assignmentCount int
 }
 
-type FetchConfig struct {
-	MinBytes          int32
-	MaxBytes          int32
-	PartitionMaxBytes int32
-	MaxWait           time.Duration
-	IsolationLevel    kafka.IsolationLevel
-}
-
-func (cr *SyncedCoordinatedReader) FetchMessages(ctx context.Context, cfg FetchConfig) ([]*kafka.Message, error) {
+func (cr *syncedCoordinatedReader) FetchMessages(ctx context.Context, cfg FetchConfig[validated]) ([]*kafka.Message, error) {
 	topics := make([]kafka.FetchRequestTopic, 0, len(cr.offsets))
 
 	for topic, partitions := range cr.offsets {
@@ -62,10 +53,10 @@ func (cr *SyncedCoordinatedReader) FetchMessages(ctx context.Context, cfg FetchC
 		return nil, fmresp.Error
 	}
 
-	return EnhancedFetchResponse(*fmresp).ReadMessages(cr.offsets)
+	return enhancedFetchResponse(*fmresp).ReadMessages(cr.offsets)
 }
 
-func (cr *SyncedCoordinatedReader) CommitMessages(ctx context.Context, messages []*kafka.Message) error {
+func (cr *syncedCoordinatedReader) CommitMessages(ctx context.Context, messages []*kafka.Message) error {
 	newOffsets := make(map[string]map[int]int64, len(cr.offsets))
 
 	for _, message := range messages {
@@ -126,7 +117,7 @@ func (cr *SyncedCoordinatedReader) CommitMessages(ctx context.Context, messages 
 	return nil
 }
 
-func (cr *SyncedCoordinatedReader) Heartbeat(ctx context.Context) error {
+func (cr *syncedCoordinatedReader) Heartbeat(ctx context.Context) error {
 	hbreq := &kafka.HeartbeatRequest{
 		GroupID:         cr.stateVector.GroupID,
 		GenerationID:    int32(cr.stateVector.GenerationID),
@@ -151,7 +142,7 @@ func (cr *SyncedCoordinatedReader) Heartbeat(ctx context.Context) error {
 	return hbresp.Error
 }
 
-func (cr *SyncedCoordinatedReader) LeaveGroup(ctx context.Context) error {
+func (cr *syncedCoordinatedReader) LeaveGroup(ctx context.Context) error {
 	lgresp, err := cr.coordinator.LeaveGroup(ctx, &kafka.LeaveGroupRequest{
 		GroupID: cr.stateVector.GroupID,
 		Members: []kafka.LeaveGroupRequestMember{
