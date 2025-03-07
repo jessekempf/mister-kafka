@@ -8,11 +8,11 @@ import (
 
 type Provided struct{}
 
-func (Provided) q()
+func (Provided) q() {}
 
 type validated struct{}
 
-func (validated) q()
+func (validated) q() {}
 
 // Marker interface to statically ensure we only accept validated FetchConfigs.
 type configQuality interface {
