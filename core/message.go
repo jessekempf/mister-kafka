@@ -23,6 +23,25 @@ type InboundMessage[T any] struct {
 	Time          time.Time
 }
 
+func MapInboundMessage[T any, U any](a *InboundMessage[T], f func(T) (U, error)) (*InboundMessage[U], error) {
+	u, err := f(a.Body)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &InboundMessage[U]{
+		Topic:         a.Topic,
+		Partition:     a.Partition,
+		Offset:        a.Offset,
+		HighWaterMark: a.HighWaterMark,
+		Key:           a.Key,
+		Headers:       a.Headers,
+		Body:          u,
+		Time:          a.Time,
+	}, nil
+}
+
 type Header struct {
 	Key   string
 	Value []byte
