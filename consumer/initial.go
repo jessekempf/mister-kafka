@@ -15,10 +15,8 @@ type initialCoordinatedReader struct {
 	coordinator *kafka.Client
 }
 
-func newCoordinatedReader(ctx context.Context, bootstrap net.Addr, group string) (*initialCoordinatedReader, error) {
-	client := &kafka.Client{Addr: bootstrap}
-
-	resp, err := client.FindCoordinator(ctx, &kafka.FindCoordinatorRequest{
+func newCoordinatedReader(ctx context.Context, bootstrap *kafka.Client, group string) (*initialCoordinatedReader, error) {
+	resp, err := bootstrap.FindCoordinator(ctx, &kafka.FindCoordinatorRequest{
 		Key:     group,
 		KeyType: kafka.CoordinatorKeyTypeConsumer,
 	})
@@ -39,7 +37,7 @@ func newCoordinatedReader(ctx context.Context, bootstrap net.Addr, group string)
 
 	return &initialCoordinatedReader{
 		group:       group,
-		coordinator: &kafka.Client{Addr: addr},
+		coordinator: &kafka.Client{Addr: addr, Transport: bootstrap.Transport},
 	}, nil
 }
 
@@ -106,7 +104,8 @@ func (cr *initialCoordinatedReader) JoinGroup(ctx context.Context, topics []stri
 
 	return &joinedCoordinatedReader{
 		coordinator: &kafka.Client{
-			Addr: cr.coordinator.Addr,
+			Addr:      cr.coordinator.Addr,
+			Transport: cr.coordinator.Transport,
 		},
 		stateVector: stateVector{
 			GroupID:         req.GroupID,

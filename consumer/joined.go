@@ -117,7 +117,8 @@ func (cr *joinedCoordinatedReader) SyncGroup(ctx context.Context) (*syncedCoordi
 
 	return &syncedCoordinatedReader{
 		coordinator: &kafka.Client{
-			Addr: cr.coordinator.Addr,
+			Addr:      cr.coordinator.Addr,
+			Transport: cr.coordinator.Transport,
 		},
 		stateVector: stateVector{
 			GroupID:         cr.stateVector.GroupID,

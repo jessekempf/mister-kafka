@@ -14,6 +14,7 @@ import (
 	"github.com/jessekempf/mister-kafka/consumer/planner"
 	"github.com/jessekempf/mister-kafka/core"
 	"github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/sasl"
 )
 
 // Consumer is a Kafka consumer that consumes Ts.
@@ -71,6 +72,22 @@ func (c *Consumer[T]) WithFetchConfig(fetchConfig FetchConfig[validated]) *Consu
 	}
 }
 
+func (c *Consumer[T]) WithSASL(mechanism sasl.Mechanism) *Consumer[T] {
+	return &Consumer[T]{
+		topic:   c.topic,
+		groupID: c.groupID,
+		client: &kafka.Client{
+			Addr:    c.client.Addr,
+			Timeout: c.client.Timeout,
+			Transport: &kafka.Transport{
+				SASL: mechanism,
+			},
+		},
+		planner:     c.planner,
+		fetchConfig: c.fetchConfig,
+	}
+}
+
 // Consume consumes messages containing Ts, passing each to the provided handle callback. Runs in the
 // caller's thread. Returns on first error.
 func (c *Consumer[T]) Consume(ctx context.Context, handle func(ctx context.Context, message *core.InboundMessage[T]) error) error {
@@ -79,7 +96,7 @@ func (c *Consumer[T]) Consume(ctx context.Context, handle func(ctx context.Conte
 	var synced *syncedCoordinatedReader
 
 	initialize := func() (err error) {
-		initial, err = newCoordinatedReader(ctx, c.client.Addr, c.groupID)
+		initial, err = newCoordinatedReader(ctx, c.client, c.groupID)
 		return
 	}
 
