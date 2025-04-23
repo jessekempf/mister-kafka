@@ -17,6 +17,25 @@ type InboundMessage[T any] struct {
 	Partition     int
 	Offset        int64
 	HighWaterMark int64
+	Key           []byte
+	Headers       []Header
 	Body          T
 	Time          time.Time
+}
+
+type Header struct {
+	Key   string
+	Value []byte
+}
+
+type Headers []Header
+
+func (ihs Headers) Get(key string) ([]byte, bool) {
+	for _, ih := range ihs {
+		if ih.Key == key {
+			return ih.Value, true
+		}
+	}
+
+	return nil, false
 }

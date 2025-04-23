@@ -28,11 +28,22 @@ func (t *ConsumerTopic[T]) DecodeMessage(km *kafka.Message) (*InboundMessage[T],
 		return nil, err
 	}
 
+	headers := make([]Header, len(km.Headers))
+
+	for i, h := range km.Headers {
+		headers[i] = Header{
+			Key:   h.Key,
+			Value: h.Value,
+		}
+	}
+
 	return &InboundMessage[T]{
 		Topic:         km.Topic,
 		Partition:     km.Partition,
 		Offset:        km.Offset,
 		HighWaterMark: km.HighWaterMark,
+		Key:           km.Key,
+		Headers:       headers,
 		Body:          *body,
 		Time:          km.Time,
 	}, nil
