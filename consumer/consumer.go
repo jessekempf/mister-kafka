@@ -135,13 +135,19 @@ func (c *Consumer[T]) Consume(ctx context.Context, handle func(ctx context.Conte
 			}
 
 			log.Printf("successfully synced group %s for %s\n", c.groupID, c.topic.Name())
+
+			defer func() {
+				err := synced.LeaveGroup(ctx)
+				if err != nil {
+					log.Printf("error on leaving group: %s", err)
+				}
+			}()
 		}
 
 		select {
 		case sig := <-sc:
 			log.Printf("received %s signal, shutting down...", sig)
-
-			return synced.LeaveGroup(ctx)
+			return nil
 		default:
 			msgs, err := synced.FetchMessages(ctx, c.fetchConfig)
 
