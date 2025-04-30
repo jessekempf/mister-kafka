@@ -47,7 +47,7 @@ func main() {
 	// Create a new consumer and set it infinitely (or at least until ^C, which Consume will trap) consuming messages
 	// from the topic.
 	err = consumer.
-		NewConsumer(kafkaAddr, kafkaGroup, kafkaTopic).
+		NewKafkaConsumer(kafkaAddr, kafkaGroup, kafkaTopic).
 		Consume(context.Background(), func(ctx context.Context, message *core.InboundMessage[GenericKafkaMessage]) error {
 			log.Printf(
 				"%s.%d: offset %d, timestamp %s: %s -> %s %s\n",

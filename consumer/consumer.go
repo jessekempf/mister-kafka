@@ -3,12 +3,9 @@ package consumer
 import (
 	"context"
 	"errors"
-	"log"
+	"fmt"
 	"net"
-	"os"
-	"os/signal"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/jessekempf/mister-kafka/consumer/planner"
@@ -19,27 +16,88 @@ import (
 
 // Consumer is a Kafka consumer that consumes Ts.
 type Consumer[T any] struct {
-	topic       core.ConsumerTopic[T]
-	groupID     string
-	client      *kafka.Client
-	planner     planner.Planner[T]
-	fetchConfig FetchConfig[validated]
+	topic   core.ConsumerTopic[T]
+	planner planner.Planner[T]
+
+	engine engine
 }
 
-// NewConsumer creates Consumer[T]s from a broker address, consumer group, topic, and decoder.
+func NewConsumer[T any](topic core.ConsumerTopic[T], engine engine) *Consumer[T] {
+	return &Consumer[T]{
+		topic:   topic,
+		planner: planner.PartitionPlanner[T],
+		engine:  engine,
+	}
+}
+
+// WithFetchConfig sets the FetchConfig on the consumer, provided it is a Kafka consumer
+func WithFetchConfig[T any](fetchConfig FetchConfig[validated]) func(*Consumer[T]) error {
+	return func(c *Consumer[T]) error {
+		switch c.engine.(type) {
+		case *kafkaEngine:
+			(c.engine).(*kafkaEngine).fetchConfig = fetchConfig
+		default:
+			return fmt.Errorf("setting FetchConfig is not supported with a %T engine", c.engine)
+		}
+
+		return nil
+	}
+}
+
+// WithPlanner sets a non-default planner on the Consumer.
+func WithPlanner[T any](planner planner.Planner[T]) func(*Consumer[T]) error {
+	return func(c *Consumer[T]) error {
+		c.planner = planner
+		return nil
+	}
+}
+
+// WithControlChannel provides a channel for the consumer to listen on, for control messages.
+func WithControlChannel[T any](controlChan <-chan engineSignal) func(*Consumer[T]) error {
+	return func(c *Consumer[T]) error {
+		switch c.engine.(type) {
+		case *kafkaEngine:
+			(c.engine).(*kafkaEngine).control = controlChan
+		default:
+			return fmt.Errorf("setting ControlChannel is not supported with a %T engine", c.engine)
+		}
+
+		return nil
+	}
+}
+
+// WithSASL sets the SASL provider to use, for Kafka consumers.
+func WithSASL[T any](mechanism sasl.Mechanism) func(*Consumer[T]) error {
+	return func(c *Consumer[T]) error {
+		switch c.engine.(type) {
+		case *kafkaEngine:
+			(c.engine).(*kafkaEngine).client.Transport = &kafka.Transport{
+				SASL: mechanism,
+			}
+		default:
+			return fmt.Errorf("setting SASL mechanism is not supported with a %T engine", c.engine)
+		}
+
+		return nil
+	}
+}
+
+// NewKafkaConsumer creates Consumer[T]s from a broker address, consumer group, topic, and decoder.
 //
 // Consumers have the following configurables with sane defaults:
 //
 // - Planner: The Partition Planner is used if a custom one is not otherwise provided.
 // - FetchConfig: The default configuration, except for IsolationLevel being set to ReadCommitted, is used.
-func NewConsumer[T any](broker net.Addr, consumerGroup string, topic core.ConsumerTopic[T]) *Consumer[T] {
-	return &Consumer[T]{
-		topic: topic,
+func NewKafkaConsumer[T any](broker net.Addr, consumerGroup string, topic core.ConsumerTopic[T], consumerOpts ...func(*Consumer[T]) error) *Consumer[T] {
+	control := make(chan engineSignal)
+
+	ke := &kafkaEngine{
+		control:   control,
+		groupID:   consumerGroup,
+		topicName: topic.Name(),
 		client: &kafka.Client{
 			Addr: broker,
 		},
-		groupID: consumerGroup,
-		planner: planner.PartitionPlanner[T],
 		fetchConfig: FetchConfig[validated]{
 			MinBytes:          1,
 			MaxBytes:          50 * 1024 * 1024,
@@ -48,156 +106,72 @@ func NewConsumer[T any](broker net.Addr, consumerGroup string, topic core.Consum
 			IsolationLevel:    kafka.ReadCommitted,
 		},
 	}
-}
 
-// WithPlanner returns a new Consumer[T] with a non-default planner set.
-func (c *Consumer[T]) WithPlanner(planner planner.Planner[T]) *Consumer[T] {
-	return &Consumer[T]{
-		topic:       c.topic,
-		groupID:     c.groupID,
-		client:      c.client,
-		planner:     planner,
-		fetchConfig: c.fetchConfig,
+	c := &Consumer[T]{
+		topic:   topic,
+		planner: planner.PartitionPlanner[T],
+		engine:  ke,
 	}
-}
 
-// WithFetchConfig returns a new Consumer[T] with a non-default fetch config set.
-func (c *Consumer[T]) WithFetchConfig(fetchConfig FetchConfig[validated]) *Consumer[T] {
-	return &Consumer[T]{
-		topic:       c.topic,
-		groupID:     c.groupID,
-		client:      c.client,
-		planner:     c.planner,
-		fetchConfig: fetchConfig,
+	for _, consumerOpt := range consumerOpts {
+		if err := consumerOpt(c); err != nil {
+			panic(err)
+		}
 	}
+
+	return c
 }
 
-func (c *Consumer[T]) WithSASL(mechanism sasl.Mechanism) *Consumer[T] {
-	return &Consumer[T]{
-		topic:   c.topic,
-		groupID: c.groupID,
-		client: &kafka.Client{
-			Addr:    c.client.Addr,
-			Timeout: c.client.Timeout,
-			Transport: &kafka.Transport{
-				SASL: mechanism,
-			},
+// NewScriptedConsumer creates Consumer[T]s from a collection of Kafka messages and a topic.
+func NewScriptedConsumer[T any](script [][]*kafka.Message, topic core.ConsumerTopic[T], consumerOpts ...func(*Consumer[T]) error) *Consumer[T] {
+	c := &Consumer[T]{
+		topic:   topic,
+		planner: planner.PartitionPlanner[T],
+		engine: &scriptedEngine{
+			script: script,
 		},
-		planner:     c.planner,
-		fetchConfig: c.fetchConfig,
 	}
+
+	for _, consumerOpt := range consumerOpts {
+		if err := consumerOpt(c); err != nil {
+			panic(err)
+		}
+	}
+
+	return c
 }
 
 // Consume consumes messages containing Ts, passing each to the provided handle callback. Runs in the
 // caller's thread. Returns on first error.
 func (c *Consumer[T]) Consume(ctx context.Context, handle func(ctx context.Context, message *core.InboundMessage[T]) error) error {
-	var initial *initialCoordinatedReader
-	var joined *joinedCoordinatedReader
-	var synced *syncedCoordinatedReader
+	return c.engine.run(ctx, func(ctx context.Context, messages []*kafka.Message) ([]*kafka.Message, error) {
+		var plan *planner.ExecutionPlan[T]
+		decodedMessages := make([]*core.InboundMessage[T], 0, len(messages))
 
-	initialize := func() (err error) {
-		initial, err = newCoordinatedReader(ctx, c.client, c.groupID)
-		return
-	}
-
-	join := func() (err error) {
-		joined, err = initial.JoinGroup(ctx, []string{c.topic.Name()})
-		return
-	}
-
-	resync := func() (err error) {
-		synced, err = joined.SyncGroup(ctx)
-		return
-	}
-
-	// Arrange to trap SIGNINT
-	sc := make(chan os.Signal, 1)
-	signal.Notify(sc, syscall.SIGINT)
-
-	for {
-		if initial == nil {
-			if err := initialize(); err != nil {
-				return err
-			}
-		}
-
-		if joined == nil {
-			if err := join(); err != nil {
-				return err
-			}
-
-			log.Printf("successfully joined group %s for %s\n", c.groupID, c.topic.Name())
-		}
-
-		if synced == nil {
-			if err := resync(); err != nil {
-				return err
-			}
-
-			log.Printf("successfully synced group %s for %s\n", c.groupID, c.topic.Name())
-
-			defer func() {
-				err := synced.LeaveGroup(ctx)
-				if err != nil {
-					log.Printf("error on leaving group: %s", err)
-				}
-			}()
-		}
-
-		select {
-		case sig := <-sc:
-			log.Printf("received %s signal, shutting down...", sig)
-			return nil
-		default:
-			msgs, err := synced.FetchMessages(ctx, c.fetchConfig)
+		for i, message := range messages {
+			im, err := c.topic.DecodeMessage(message)
 
 			if err != nil {
-				return err
+				return nil, err
 			}
 
-			if len(msgs) == 0 {
-				err = synced.Heartbeat(ctx)
-			} else {
-				var plan *planner.ExecutionPlan[T]
-				messages := make([]*core.InboundMessage[T], 0, len(msgs))
-
-				for _, message := range msgs {
-					im, err := c.topic.DecodeMessage(message)
-
-					if err != nil {
-						return err
-					}
-
-					messages = append(messages, im)
-				}
-
-				plan, err = c.planner(messages)
-
-				if err != nil {
-					return err
-				}
-
-				err = executePlan(ctx, plan, handle)
-
-				if err != nil {
-					return err
-				}
-
-				err = synced.CommitMessages(ctx, msgs)
-			}
-
-			if err != nil {
-				if errors.Is(err, kafka.RebalanceInProgress) {
-					log.Printf("rebalance in progress, forcing rejoin")
-					joined = nil
-					synced = nil
-					continue
-				}
-
-				return err
-			}
+			decodedMessages[i] = im
 		}
-	}
+
+		plan, err := c.planner(decodedMessages)
+
+		if err != nil {
+			return nil, err
+		}
+
+		err = executePlan(ctx, plan, handle)
+
+		if err != nil {
+			return nil, err
+		}
+
+		return messages, nil
+	})
 }
 
 func executePlan[T any](ctx context.Context, plan *planner.ExecutionPlan[T], handle func(context.Context, *core.InboundMessage[T]) error) error {
