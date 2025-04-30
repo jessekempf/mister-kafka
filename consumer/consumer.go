@@ -146,7 +146,7 @@ func NewScriptedConsumer[T any](script [][]*kafka.Message, topic core.ConsumerTo
 func (c *Consumer[T]) Consume(ctx context.Context, handle func(ctx context.Context, message *core.InboundMessage[T]) error) error {
 	return c.engine.run(ctx, func(ctx context.Context, messages []*kafka.Message) ([]*kafka.Message, error) {
 		var plan *planner.ExecutionPlan[T]
-		decodedMessages := make([]*core.InboundMessage[T], 0, len(messages))
+		decodedMessages := make([]*core.InboundMessage[T], len(messages))
 
 		for i, message := range messages {
 			im, err := c.topic.DecodeMessage(message)
