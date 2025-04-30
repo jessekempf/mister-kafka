@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/segmentio/kafka-go"
 )
@@ -18,6 +21,22 @@ type engineSignal int
 const (
 	engineSignalStop engineSignal = iota
 )
+
+func StopOnSignals(signals []syscall.Signal) chan engineSignal {
+	signalChannel := make(chan os.Signal, 1)
+	engineChannel := make(chan engineSignal, 1)
+
+	signal.Notify(signalChannel, syscall.SIGINT)
+
+	go func() {
+		for {
+			<-signalChannel
+			engineChannel <- engineSignalStop
+		}
+	}()
+
+	return engineChannel
+}
 
 type kafkaEngine struct {
 	control     <-chan engineSignal
