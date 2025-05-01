@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -9,6 +10,19 @@ import (
 
 	"github.com/segmentio/kafka-go"
 )
+
+type wrappedKafkaError struct {
+	message    string
+	underlying kafka.Error
+}
+
+func (wke *wrappedKafkaError) Unwrap() error {
+	return wke.underlying
+}
+
+func (wke *wrappedKafkaError) Error() string {
+	return fmt.Sprintf("%s [kafka error %d]", wke.message, wke.underlying)
+}
 
 type initialCoordinatedReader struct {
 	group       string
@@ -46,6 +60,27 @@ func (cr *initialCoordinatedReader) JoinGroup(ctx context.Context, topics []stri
 
 	if err != nil {
 		return nil, err
+	}
+
+	metadata, err := cr.coordinator.Metadata(ctx, &kafka.MetadataRequest{
+		Topics: topics,
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("error requesting cluster metadata: %w", err)
+	}
+
+	for _, topicMetadata := range metadata.Topics {
+		if topicMetadata.Error != nil {
+			if errors.Is(topicMetadata.Error, kafka.UnknownTopicOrPartition) {
+				return nil, &wrappedKafkaError{
+					message:    fmt.Sprintf("topic %s does not exist", topicMetadata.Name),
+					underlying: kafka.UnknownTopicOrPartition,
+				}
+			}
+
+			return nil, fmt.Errorf("error retrieving topic metadata for %s: %w", topicMetadata.Name, topicMetadata.Error)
+		}
 	}
 
 	if len(groupBalancers) == 0 {
