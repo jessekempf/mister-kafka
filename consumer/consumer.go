@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -66,13 +67,14 @@ func WithControlChannel[T any](controlChan <-chan engineSignal) func(*Consumer[T
 	}
 }
 
-// WithSASL sets the SASL provider to use, for Kafka consumers.
-func WithSASL[T any](mechanism sasl.Mechanism) func(*Consumer[T]) error {
+// WithSecurity sets the SASL provider and TLS settings to use, for Kafka consumers.
+func WithSecurity[T any](mechanism sasl.Mechanism, config *tls.Config) func(*Consumer[T]) error {
 	return func(c *Consumer[T]) error {
 		switch c.engine.(type) {
 		case *kafkaEngine:
 			(c.engine).(*kafkaEngine).client.Transport = &kafka.Transport{
 				SASL: mechanism,
+				TLS:  config,
 			}
 		default:
 			return fmt.Errorf("setting SASL mechanism is not supported with a %T engine", c.engine)
