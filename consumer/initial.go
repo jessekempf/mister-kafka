@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"time"
 
@@ -43,7 +42,7 @@ func newCoordinatedReader(ctx context.Context, bootstrap *kafka.Client, group st
 		return nil, resp.Error
 	}
 
-	addr, err := net.ResolveTCPAddr("tcp", net.JoinHostPort(resp.Coordinator.Host, fmt.Sprintf("%d", resp.Coordinator.Port)))
+	addr := &Hostname{name: resp.Coordinator.Host, port: resp.Coordinator.Port}
 
 	if err != nil {
 		return nil, err
