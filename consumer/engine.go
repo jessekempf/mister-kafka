@@ -9,7 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/segmentio/kafka-go"
+	"github.com/jessekempf/kafka-go"
 )
 
 type engine interface {

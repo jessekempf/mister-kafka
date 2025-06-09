@@ -9,10 +9,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jessekempf/kafka-go"
+	"github.com/jessekempf/kafka-go/sasl"
 	"github.com/jessekempf/mister-kafka/consumer/planner"
 	"github.com/jessekempf/mister-kafka/core"
-	"github.com/segmentio/kafka-go"
-	"github.com/segmentio/kafka-go/sasl"
 )
 
 // Consumer is a Kafka consumer that consumes Ts.

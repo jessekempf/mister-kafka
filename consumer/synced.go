@@ -4,7 +4,7 @@ import (
 	"context"
 	"log"
 
-	"github.com/segmentio/kafka-go"
+	"github.com/jessekempf/kafka-go"
 )
 
 type syncedCoordinatedReader struct {

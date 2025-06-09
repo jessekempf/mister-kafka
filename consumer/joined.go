@@ -5,7 +5,7 @@ import (
 	"log"
 	"slices"
 
-	"github.com/segmentio/kafka-go"
+	"github.com/jessekempf/kafka-go"
 )
 
 type joinedCoordinatedReader struct {

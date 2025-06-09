@@ -3,7 +3,7 @@ package core
 import (
 	"time"
 
-	"github.com/segmentio/kafka-go"
+	"github.com/jessekempf/kafka-go"
 )
 
 // OutboundMessage represents a message being produced to Kafka.

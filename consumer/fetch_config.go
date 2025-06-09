@@ -3,7 +3,7 @@ package consumer
 import (
 	"time"
 
-	"github.com/segmentio/kafka-go"
+	"github.com/jessekempf/kafka-go"
 )
 
 type Provided struct{}

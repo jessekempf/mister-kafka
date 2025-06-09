@@ -5,10 +5,10 @@ import (
 	"log"
 	"net"
 
+	"github.com/jessekempf/kafka-go"
 	"github.com/jessekempf/mister-kafka/consumer"
 	"github.com/jessekempf/mister-kafka/core"
 	"github.com/jessekempf/mister-kafka/utils/cli"
-	"github.com/segmentio/kafka-go"
 )
 
 // GenericKafkaMessage preserves the basic structure of a Kafka message

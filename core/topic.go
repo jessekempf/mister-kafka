@@ -3,7 +3,7 @@ package core
 import (
 	"fmt"
 
-	"github.com/segmentio/kafka-go"
+	"github.com/jessekempf/kafka-go"
 )
 
 // ConsumerTopic is a topic from which messages with key type K and value type V may be consumed.

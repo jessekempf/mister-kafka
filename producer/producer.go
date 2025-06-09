@@ -5,8 +5,8 @@ import (
 	"math"
 	"net"
 
+	"github.com/jessekempf/kafka-go"
 	"github.com/jessekempf/mister-kafka/core"
-	"github.com/segmentio/kafka-go"
 )
 
 type Producer[K any, V any] struct {

@@ -3,7 +3,7 @@ package consumer
 import (
 	"io"
 
-	"github.com/segmentio/kafka-go"
+	"github.com/jessekempf/kafka-go"
 )
 
 type enhancedFetchResponse kafka.FetchResponse

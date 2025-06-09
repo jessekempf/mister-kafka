@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/segmentio/kafka-go"
+	"github.com/jessekempf/kafka-go"
 )
 
 type wrappedKafkaError struct {
