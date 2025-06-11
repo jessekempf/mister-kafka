@@ -196,8 +196,13 @@ func executePlan[T any](ctx context.Context, plan *planner.ExecutionPlan[T], han
 	}
 
 	executors.Wait()
+	close(errChan)
 
 	errs := make([]error, 0, len(errChan))
+
+	for err := range errChan {
+		errs = append(errs, err)
+	}
 
 	return errors.Join(errs...)
 }
