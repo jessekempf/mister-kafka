@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"slices"
 
@@ -15,7 +16,7 @@ type joinedCoordinatedReader struct {
 	groupMembers  []kafka.JoinGroupResponseMember
 }
 
-func (cr *joinedCoordinatedReader) SyncGroup(ctx context.Context) (*syncedCoordinatedReader, error) {
+func (cr *joinedCoordinatedReader) SyncGroup(ctx context.Context, onMissingOffset func(int) kafka.OffsetRequest) (*syncedCoordinatedReader, error) {
 	assignments := []kafka.SyncGroupRequestAssignment{}
 
 	if len(cr.groupMembers) > 0 {
@@ -98,6 +99,7 @@ func (cr *joinedCoordinatedReader) SyncGroup(ctx context.Context) (*syncedCoordi
 	}
 
 	offsets := make(map[string]map[int]int64)
+	needLookups := make(map[string][]kafka.OffsetRequest)
 
 	for topic := range ofresp.Topics {
 		for _, partitionInfo := range ofresp.Topics[topic] {
@@ -105,14 +107,52 @@ func (cr *joinedCoordinatedReader) SyncGroup(ctx context.Context) (*syncedCoordi
 				offsets[topic] = make(map[int]int64)
 			}
 
+			if needLookups[topic] == nil {
+				needLookups[topic] = make([]kafka.OffsetRequest, 0)
+			}
+
+			if partitionInfo.CommittedOffset == -1 {
+				if onMissingOffset == nil {
+					return nil, fmt.Errorf(
+						"JoinedCoordinatedReader.SyncGroup(): %s[%d] has no defined offset and no offset reset policy is set",
+						topic,
+						partitionInfo.Partition,
+					)
+				}
+				needLookups[topic] = append(needLookups[topic], onMissingOffset(partitionInfo.Partition))
+			}
+
 			offsets[topic][partitionInfo.Partition] = partitionInfo.CommittedOffset
 		}
 	}
 
+	loresp, err := cr.coordinator.ListOffsets(ctx, &kafka.ListOffsetsRequest{
+		Topics:         needLookups,
+		IsolationLevel: kafka.ReadCommitted,
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	for topic := range loresp.Topics {
+		for _, partitionOffset := range loresp.Topics[topic] {
+			if partitionOffset.FirstOffset != -1 {
+				offsets[topic][partitionOffset.Partition] = partitionOffset.FirstOffset
+			}
+
+			if partitionOffset.LastOffset != -1 {
+				offsets[topic][partitionOffset.Partition] = partitionOffset.LastOffset
+			}
+		}
+	}
+
 	log.Printf(
-		"JoinedCoordinatedReader.SyncGroup(): received %d partition assignments: %#v\n",
+		"%T.SyncGroup(): received %d partition assignments: %#v %#v\n",
+		cr,
 		assignmentCount,
 		sgresp.Assignment.AssignedPartitions,
+		offsets,
 	)
 
 	return &syncedCoordinatedReader{

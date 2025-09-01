@@ -84,6 +84,32 @@ func WithSecurity[T any](mechanism sasl.Mechanism, config *tls.Config) func(*Con
 	}
 }
 
+func WithAutoOffsetResetEarliest[T any]() func(*Consumer[T]) error {
+	return func(c *Consumer[T]) error {
+		switch c.engine.(type) {
+		case *kafkaEngine:
+			c.engine.(*kafkaEngine).onMissingOffset = kafka.FirstOffsetOf
+		default:
+			return fmt.Errorf("setting offset reset policy is not supported with a %T engine", c.engine)
+		}
+
+		return nil
+	}
+}
+
+func WithAutoOffsetResetLatest[T any]() func(*Consumer[T]) error {
+	return func(c *Consumer[T]) error {
+		switch c.engine.(type) {
+		case *kafkaEngine:
+			c.engine.(*kafkaEngine).onMissingOffset = kafka.LastOffsetOf
+		default:
+			return fmt.Errorf("setting offset reset policy is not supported with a %T engine", c.engine)
+		}
+
+		return nil
+	}
+}
+
 // NewKafkaConsumer creates Consumer[T]s from a broker address, consumer group, topic, and decoder.
 //
 // Consumers have the following configurables with sane defaults:
@@ -107,6 +133,7 @@ func NewKafkaConsumer[T any](broker net.Addr, consumerGroup string, topic core.C
 			MaxWait:           10 * time.Second,
 			IsolationLevel:    kafka.ReadCommitted,
 		},
+		onMissingOffset: nil,
 	}
 
 	c := &Consumer[T]{

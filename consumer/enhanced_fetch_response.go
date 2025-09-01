@@ -1,6 +1,7 @@
 package consumer
 
 import (
+	"fmt"
 	"io"
 
 	"github.com/jessekempf/kafka-go"
@@ -14,7 +15,7 @@ func (r enhancedFetchResponse) ReadMessages(offsets map[string]map[int]int64) ([
 	for _, topic := range r.Topics {
 		for _, partition := range topic.Partitions {
 			if partition.Error != nil {
-				return nil, partition.Error
+				return nil, fmt.Errorf("error when reading %s[%d]: %w", topic.Topic, partition.Partition, partition.Error)
 			}
 
 			for {
@@ -25,7 +26,7 @@ func (r enhancedFetchResponse) ReadMessages(offsets map[string]map[int]int64) ([
 				}
 
 				if err != nil {
-					return nil, err
+					return nil, fmt.Errorf("error when reading %s[%d].%d: %w", topic.Topic, partition.Partition, rec.Offset, err)
 				}
 
 				if rec.Offset < offsets[topic.Topic][partition.Partition] {

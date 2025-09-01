@@ -39,11 +39,12 @@ func StopOnSignals(signals []syscall.Signal) chan engineSignal {
 }
 
 type kafkaEngine struct {
-	control     <-chan engineSignal
-	groupID     string
-	topicName   string
-	client      *kafka.Client
-	fetchConfig FetchConfig[validated]
+	control         <-chan engineSignal
+	groupID         string
+	topicName       string
+	client          *kafka.Client
+	fetchConfig     FetchConfig[validated]
+	onMissingOffset func(int) kafka.OffsetRequest
 }
 
 func (ke *kafkaEngine) run(ctx context.Context, handle func(ctx context.Context, messages []*kafka.Message) ([]*kafka.Message, error)) error {
@@ -62,7 +63,7 @@ func (ke *kafkaEngine) run(ctx context.Context, handle func(ctx context.Context,
 	}
 
 	resync := func() (err error) {
-		synced, err = joined.SyncGroup(ctx)
+		synced, err = joined.SyncGroup(ctx, ke.onMissingOffset)
 		return
 	}
 
@@ -107,7 +108,7 @@ func (ke *kafkaEngine) run(ctx context.Context, handle func(ctx context.Context,
 			msgs, err := synced.FetchMessages(ctx, ke.fetchConfig)
 
 			if err != nil {
-				return err
+				return fmt.Errorf("fetch error: %w", err)
 			}
 
 			if len(msgs) == 0 {
